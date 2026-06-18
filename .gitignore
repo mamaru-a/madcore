@@ -1,0 +1,29 @@
+# Dependencies
+node_modules/
+
+# Build output
+dist/
+
+# Environment
+.env
+.env.*
+
+# Logs
+*.log
+npm-debug.log*
+bun-debug.log*
+
+# TypeScript
+*.tsbuildinfo
+
+# Test / coverage
+coverage/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Other package managers (project uses bun)
+package-lock.json
+yarn.lock
+pnpm-lock.yaml

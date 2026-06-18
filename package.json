@@ -1,0 +1,47 @@
+{
+  "name": "madcore-web",
+  "version": "2.0.0",
+  "license": "LGPL-3.0-or-later",
+  "type": "module",
+  "main": "./dist/sdk.js",
+  "types": "./dist/sdk.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/sdk.d.ts",
+      "import": "./dist/sdk.js"
+    },
+    "./store": {
+      "types": "./dist/store.d.ts",
+      "import": "./dist/store.js"
+    },
+    "./types": {
+      "types": "./dist/types.d.ts",
+      "import": "./dist/types.js"
+    }
+  },
+  "files": [
+    "dist",
+    "LICENSE"
+  ],
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsc --watch",
+    "test": "bun run test/full.ts",
+    "test:single": "bun run test/single.ts",
+    "test:two-party": "bun run test/two-party.ts",
+    "test:full": "bun run test/full.ts",
+    "test:advanced": "bun run test/advanced.ts",
+    "test:interactive": "bun run test/interactive.ts",
+    "test:group": "bun run test/interactive-group.ts",
+    "test:join-group": "bun run test/join-group.ts",
+    "test:channel": "bun run test/interactive-channel.ts"
+  },
+  "dependencies": {
+    "openpgp": "^6.0.1"
+  },
+  "devDependencies": {
+    "@types/node": "^25.5.0",
+    "bun-types": "^1.2.0",
+    "typescript": "^5.4.0"
+  }
+}
