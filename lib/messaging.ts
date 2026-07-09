@@ -18,8 +18,14 @@ import { log } from './logger';
  */
 
 import type { SDKContext } from './context';
-
-const crypto = globalThis.crypto;
+import {
+    buildFromHeader,
+    buildInnerMultipart,
+    buildInnerText,
+    buildPgpMimeEnvelope,
+    bracketEmail,
+    sendEncryptedMime,
+} from './mime-build';
 
 // ─── Text Message ───────────────────────────────────────────────────────────────
 
@@ -27,59 +33,44 @@ const crypto = globalThis.crypto;
 export async function sendTextMessage(ctx: SDKContext, toEmail: string, text: string): Promise<string> {
     const msgId = ctx.generateMsgId();
     const now = new Date().toUTCString();
-    const fromHeader = ctx.displayName
-        ? `From: "${ctx.displayName}" <${ctx.credentials.email}>`
-        : `From: <${ctx.credentials.email}>`;
-
+    const fromHeader = buildFromHeader(ctx);
     const peerKey = ctx.knownKeys.get(toEmail.toLowerCase());
 
-    const rawEmailLines = [
+    if (peerKey && ctx.privateKey && ctx.publicKey) {
+        // encrypt() wraps plaintext for Autocrypt-style text payloads (not raw MIME)
+        const armored = await ctx.encrypt(text, peerKey, {
+            from: ctx.credentials.email,
+            to: toEmail,
+        });
+        const rawEmail = buildPgpMimeEnvelope({
+            fromHeader,
+            toHeader: bracketEmail(toEmail),
+            msgId,
+            date: now,
+            outerHeaders: [dispositionNotificationHeader(ctx)],
+            autocryptHeader: ctx.buildAutocryptHeader(),
+            armored,
+        });
+        await ctx.sendRaw(ctx.credentials.email, [toEmail], rawEmail);
+        log.info('messaging', `Sent encrypted message to ${toEmail} [${msgId}]`);
+        return msgId;
+    }
+
+    const rawEmail = [
         fromHeader,
-        `To: <${toEmail}>`,
+        `To: ${bracketEmail(toEmail)}`,
         `Date: ${now}`,
         `Message-ID: ${msgId}`,
         `Subject: [...]`,
         `Chat-Version: 1.0`,
         ctx.buildAutocryptHeader(),
-    ];
-
-    if (peerKey && ctx.privateKey && ctx.publicKey) {
-        const armored = await ctx.encrypt(text, peerKey, {
-            from: ctx.credentials.email,
-            to: toEmail,
-        });
-        const encBoundary = `encrypted-${crypto.randomUUID().slice(0, 8)}`;
-        rawEmailLines.push(
-            `Content-Type: multipart/encrypted; protocol="application/pgp-encrypted"; boundary="${encBoundary}"`,
-            `MIME-Version: 1.0`,
-            '',
-            `--${encBoundary}`,
-            `Content-Type: application/pgp-encrypted`,
-            `Content-Description: PGP/MIME version identification`,
-            '',
-            `Version: 1`,
-            '',
-            `--${encBoundary}`,
-            `Content-Type: application/octet-stream; name="encrypted.asc"`,
-            `Content-Description: OpenPGP encrypted message`,
-            `Content-Disposition: inline; filename="encrypted.asc"`,
-            '',
-            armored,
-            '',
-            `--${encBoundary}--`
-        );
-    } else {
-        rawEmailLines.push(
-            `Content-Type: text/plain; charset=utf-8`,
-            `MIME-Version: 1.0`,
-            '',
-            text
-        );
-    }
-
-    const rawEmail = rawEmailLines.join('\r\n');
+        `Content-Type: text/plain; charset=utf-8`,
+        `MIME-Version: 1.0`,
+        '',
+        text,
+    ].join('\r\n');
     await ctx.sendRaw(ctx.credentials.email, [toEmail], rawEmail);
-    log.info('messaging', `Sent${peerKey ? ' encrypted' : ''} message to ${toEmail} [${msgId}]`);
+    log.info('messaging', `Sent message to ${toEmail} [${msgId}]`);
     return msgId;
 }
 
@@ -93,18 +84,8 @@ export async function sendReply(
     text: string,
     quotedText?: string
 ): Promise<string> {
-    const peerKey = ctx.knownKeys.get(toEmail.toLowerCase());
-    if (!peerKey || !ctx.privateKey || !ctx.publicKey) {
-        throw new Error(`No key for ${toEmail} — cannot send encrypted reply`);
-    }
+    const fromHeader = buildFromHeader(ctx);
 
-    const msgId = ctx.generateMsgId();
-    const now = new Date().toUTCString();
-    const fromHeader = ctx.displayName
-        ? `From: "${ctx.displayName}" <${ctx.credentials.email}>`
-        : `From: <${ctx.credentials.email}>`;
-
-    // Build quoted text block (same format as core: "> line\r\n")
     let body = '';
     if (quotedText) {
         for (const line of quotedText.split('\n')) {
@@ -114,49 +95,23 @@ export async function sendReply(
     }
     body += text;
 
-    const innerMime = [
-        `Content-Type: text/plain; charset="utf-8"; protected-headers="v1"`,
+    const innerMime = buildInnerText(
+        [
+            `Content-Type: text/plain; charset="utf-8"; protected-headers="v1"`,
+            fromHeader,
+            `To: ${bracketEmail(toEmail)}`,
+            `In-Reply-To: ${parentMsgId}`,
+            `Chat-Version: 1.0`,
+        ],
+        body,
+    );
+
+    const msgId = await sendEncryptedMime(ctx, {
+        toEmail,
+        outerHeaders: [`In-Reply-To: ${parentMsgId}`, `References: ${parentMsgId}`],
+        innerMime,
         fromHeader,
-        `To: <${toEmail}>`,
-        `In-Reply-To: ${parentMsgId}`,
-        `Chat-Version: 1.0`,
-        '',
-        body
-    ].join('\r\n');
-
-    const armored = await ctx.encryptRaw(innerMime, peerKey);
-    const encBoundary = `encrypted-${crypto.randomUUID().slice(0, 8)}`;
-
-    const rawEmail = [
-        fromHeader,
-        `To: <${toEmail}>`,
-        `Date: ${now}`,
-        `Message-ID: ${msgId}`,
-        `Subject: [...]`,
-        `Chat-Version: 1.0`,
-        `In-Reply-To: ${parentMsgId}`,
-        `References: ${parentMsgId}`,
-        ctx.buildAutocryptHeader(),
-        `Content-Type: multipart/encrypted; protocol="application/pgp-encrypted"; boundary="${encBoundary}"`,
-        `MIME-Version: 1.0`,
-        '',
-        `--${encBoundary}`,
-        `Content-Type: application/pgp-encrypted`,
-        `Content-Description: PGP/MIME version identification`,
-        '',
-        `Version: 1`,
-        '',
-        `--${encBoundary}`,
-        `Content-Type: application/octet-stream; name="encrypted.asc"`,
-        `Content-Description: OpenPGP encrypted message`,
-        `Content-Disposition: inline; filename="encrypted.asc"`,
-        '',
-        armored,
-        '',
-        `--${encBoundary}--`
-    ].join('\r\n');
-
-    await ctx.sendRaw(ctx.credentials.email, [toEmail], rawEmail);
+    });
     log.info('messaging', `Sent reply to ${parentMsgId} → ${toEmail} [${msgId}]`);
     return msgId;
 }
@@ -165,56 +120,23 @@ export async function sendReply(
 
 /** Send a reaction (Content-Disposition: reaction, RFC 9078) */
 export async function sendReaction(ctx: SDKContext, toEmail: string, targetMsgId: string, emoji: string): Promise<void> {
-    const peerKey = ctx.knownKeys.get(toEmail.toLowerCase());
-    if (!peerKey || !ctx.privateKey || !ctx.publicKey) {
-        throw new Error(`No key for ${toEmail} — cannot send encrypted reaction`);
-    }
+    const innerMime = buildInnerText(
+        [
+            `Content-Disposition: reaction`,
+            `Content-Type: text/plain; charset="utf-8"; protected-headers="v1"`,
+            `From: <${ctx.credentials.email}>`,
+            `To: ${bracketEmail(toEmail)}`,
+            `In-Reply-To: ${targetMsgId}`,
+        ],
+        emoji,
+    );
 
-    const msgId = ctx.generateMsgId();
-    const now = new Date().toUTCString();
-
-    const reactionMime = [
-        `Content-Disposition: reaction`,
-        `Content-Type: text/plain; charset="utf-8"; protected-headers="v1"`,
-        `From: <${ctx.credentials.email}>`,
-        `To: <${toEmail}>`,
-        `In-Reply-To: ${targetMsgId}`,
-        '',
-        emoji
-    ].join('\r\n');
-
-    const armored = await ctx.encryptRaw(reactionMime, peerKey);
-    const encBoundary = `encrypted-${crypto.randomUUID().slice(0, 8)}`;
-
-    const rawEmail = [
-        `From: <${ctx.credentials.email}>`,
-        `To: <${toEmail}>`,
-        `Date: ${now}`,
-        `Message-ID: ${msgId}`,
-        `Subject: [...]`,
-        `Chat-Version: 1.0`,
-        `In-Reply-To: ${targetMsgId}`,
-        ctx.buildAutocryptHeader(),
-        `Content-Type: multipart/encrypted; protocol="application/pgp-encrypted"; boundary="${encBoundary}"`,
-        `MIME-Version: 1.0`,
-        '',
-        `--${encBoundary}`,
-        `Content-Type: application/pgp-encrypted`,
-        `Content-Description: PGP/MIME version identification`,
-        '',
-        `Version: 1`,
-        '',
-        `--${encBoundary}`,
-        `Content-Type: application/octet-stream; name="encrypted.asc"`,
-        `Content-Description: OpenPGP encrypted message`,
-        `Content-Disposition: inline; filename="encrypted.asc"`,
-        '',
-        armored,
-        '',
-        `--${encBoundary}--`
-    ].join('\r\n');
-
-    await ctx.sendRaw(ctx.credentials.email, [toEmail], rawEmail);
+    await sendEncryptedMime(ctx, {
+        toEmail,
+        outerHeaders: [`In-Reply-To: ${targetMsgId}`],
+        innerMime,
+        fromHeader: `From: <${ctx.credentials.email}>`,
+    });
     log.info('messaging', `Sent reaction ${emoji} to ${targetMsgId}`);
 }
 
@@ -222,54 +144,21 @@ export async function sendReaction(ctx: SDKContext, toEmail: string, targetMsgId
 
 /** Send a delete-for-everyone request (Chat-Delete header) */
 export async function sendDelete(ctx: SDKContext, toEmail: string, targetMsgId: string): Promise<void> {
-    const peerKey = ctx.knownKeys.get(toEmail.toLowerCase());
-    if (!peerKey || !ctx.privateKey || !ctx.publicKey) {
-        throw new Error(`No key for ${toEmail} — cannot send encrypted delete`);
-    }
+    const innerMime = buildInnerText(
+        [
+            `Chat-Delete: ${targetMsgId}`,
+            `Content-Type: text/plain; charset="utf-8"; protected-headers="v1"`,
+            `From: <${ctx.credentials.email}>`,
+            `To: ${bracketEmail(toEmail)}`,
+        ],
+        '🚮',
+    );
 
-    const msgId = ctx.generateMsgId();
-    const now = new Date().toUTCString();
-
-    const deleteMime = [
-        `Chat-Delete: ${targetMsgId}`,
-        `Content-Type: text/plain; charset="utf-8"; protected-headers="v1"`,
-        `From: <${ctx.credentials.email}>`,
-        `To: <${toEmail}>`,
-        '',
-        '🚮'
-    ].join('\r\n');
-
-    const armored = await ctx.encryptRaw(deleteMime, peerKey);
-    const encBoundary = `encrypted-${crypto.randomUUID().slice(0, 8)}`;
-
-    const rawEmail = [
-        `From: <${ctx.credentials.email}>`,
-        `To: <${toEmail}>`,
-        `Date: ${now}`,
-        `Message-ID: ${msgId}`,
-        `Subject: [...]`,
-        `Chat-Version: 1.0`,
-        ctx.buildAutocryptHeader(),
-        `Content-Type: multipart/encrypted; protocol="application/pgp-encrypted"; boundary="${encBoundary}"`,
-        `MIME-Version: 1.0`,
-        '',
-        `--${encBoundary}`,
-        `Content-Type: application/pgp-encrypted`,
-        `Content-Description: PGP/MIME version identification`,
-        '',
-        `Version: 1`,
-        '',
-        `--${encBoundary}`,
-        `Content-Type: application/octet-stream; name="encrypted.asc"`,
-        `Content-Description: OpenPGP encrypted message`,
-        `Content-Disposition: inline; filename="encrypted.asc"`,
-        '',
-        armored,
-        '',
-        `--${encBoundary}--`
-    ].join('\r\n');
-
-    await ctx.sendRaw(ctx.credentials.email, [toEmail], rawEmail);
+    await sendEncryptedMime(ctx, {
+        toEmail,
+        innerMime,
+        fromHeader: `From: <${ctx.credentials.email}>`,
+    });
     log.info('messaging', `Sent delete request for ${targetMsgId} to ${toEmail}`);
 }
 
@@ -277,58 +166,23 @@ export async function sendDelete(ctx: SDKContext, toEmail: string, targetMsgId: 
 
 /** Send an edit-message request (Chat-Edit header) — updates text of an existing message */
 export async function sendEdit(ctx: SDKContext, toEmail: string, targetMsgId: string, newText: string): Promise<void> {
-    const peerKey = ctx.knownKeys.get(toEmail.toLowerCase());
-    if (!peerKey || !ctx.privateKey || !ctx.publicKey) {
-        throw new Error(`No key for ${toEmail} — cannot send encrypted edit`);
-    }
+    const fromHeader = buildFromHeader(ctx);
+    const innerMime = buildInnerText(
+        [
+            `Chat-Edit: ${targetMsgId}`,
+            `Content-Type: text/plain; charset="utf-8"; protected-headers="v1"`,
+            fromHeader,
+            `To: ${bracketEmail(toEmail)}`,
+        ],
+        newText,
+    );
 
-    const msgId = ctx.generateMsgId();
-    const now = new Date().toUTCString();
-    const fromHeader = ctx.displayName
-        ? `From: "${ctx.displayName}" <${ctx.credentials.email}>`
-        : `From: <${ctx.credentials.email}>`;
-
-    const editMime = [
-        `Chat-Edit: ${targetMsgId}`,
-        `Content-Type: text/plain; charset="utf-8"; protected-headers="v1"`,
+    await sendEncryptedMime(ctx, {
+        toEmail,
+        outerHeaders: [`Chat-Edit: ${targetMsgId}`],
+        innerMime,
         fromHeader,
-        `To: <${toEmail}>`,
-        '',
-        newText
-    ].join('\r\n');
-
-    const armored = await ctx.encryptRaw(editMime, peerKey);
-    const encBoundary = `encrypted-${crypto.randomUUID().slice(0, 8)}`;
-
-    const rawEmail = [
-        fromHeader,
-        `To: <${toEmail}>`,
-        `Date: ${now}`,
-        `Message-ID: ${msgId}`,
-        `Subject: [...]`,
-        `Chat-Version: 1.0`,
-        `Chat-Edit: ${targetMsgId}`,
-        ctx.buildAutocryptHeader(),
-        `Content-Type: multipart/encrypted; protocol="application/pgp-encrypted"; boundary="${encBoundary}"`,
-        `MIME-Version: 1.0`,
-        '',
-        `--${encBoundary}`,
-        `Content-Type: application/pgp-encrypted`,
-        `Content-Description: PGP/MIME version identification`,
-        '',
-        `Version: 1`,
-        '',
-        `--${encBoundary}`,
-        `Content-Type: application/octet-stream; name="encrypted.asc"`,
-        `Content-Description: OpenPGP encrypted message`,
-        `Content-Disposition: inline; filename="encrypted.asc"`,
-        '',
-        armored,
-        '',
-        `--${encBoundary}--`
-    ].join('\r\n');
-
-    await ctx.sendRaw(ctx.credentials.email, [toEmail], rawEmail);
+    });
     log.info('messaging', `Sent edit for ${targetMsgId} → "${newText.substring(0, 40)}..."`);
 }
 
@@ -343,78 +197,30 @@ async function sendAttachmentMessage(
     mimeType: string,
     caption: string,
     extraHeaders: string[] = [],
-    logEmoji = '📎',
     logLabel = 'file'
 ): Promise<string> {
-    const peerKey = ctx.knownKeys.get(toEmail.toLowerCase());
-    if (!peerKey || !ctx.privateKey || !ctx.publicKey) {
-        throw new Error(`No key for ${toEmail} — cannot send encrypted ${logLabel}`);
-    }
+    const fromHeader = buildFromHeader(ctx);
+    const innerMime = buildInnerMultipart({
+        headers: [
+            fromHeader,
+            `To: ${bracketEmail(toEmail)}`,
+            `Chat-Version: 1.0`,
+            ...extraHeaders,
+        ],
+        text: caption,
+        parts: [{
+            mimeType,
+            filename,
+            base64: base64Data,
+            disposition: 'attachment',
+        }],
+    });
 
-    const msgId = ctx.generateMsgId();
-    const now = new Date().toUTCString();
-    const fromHeader = ctx.displayName
-        ? `From: "${ctx.displayName}" <${ctx.credentials.email}>`
-        : `From: <${ctx.credentials.email}>`;
-    const innerBoundary = `mixed-${crypto.randomUUID().slice(0, 8)}`;
-
-    const headerLines = [
-        `Content-Type: multipart/mixed; boundary="${innerBoundary}"; protected-headers="v1"`,
+    const msgId = await sendEncryptedMime(ctx, {
+        toEmail,
+        innerMime,
         fromHeader,
-        `To: <${toEmail}>`,
-        `Chat-Version: 1.0`,
-        ...extraHeaders,
-    ].filter(l => l.length > 0);
-
-    const innerMime = [
-        ...headerLines,
-        '',
-        `--${innerBoundary}`,
-        `Content-Type: text/plain; charset="utf-8"`,
-        '',
-        caption,
-        '',
-        `--${innerBoundary}`,
-        `Content-Type: ${mimeType}; name="${filename}"`,
-        `Content-Disposition: attachment; filename="${filename}"`,
-        `Content-Transfer-Encoding: base64`,
-        '',
-        base64Data,
-        '',
-        `--${innerBoundary}--`
-    ].join('\r\n');
-
-    const armored = await ctx.encryptRaw(innerMime, peerKey);
-    const encBoundary = `encrypted-${crypto.randomUUID().slice(0, 8)}`;
-
-    const rawEmail = [
-        fromHeader,
-        `To: <${toEmail}>`,
-        `Date: ${now}`,
-        `Message-ID: ${msgId}`,
-        `Subject: [...]`,
-        `Chat-Version: 1.0`,
-        ctx.buildAutocryptHeader(),
-        `Content-Type: multipart/encrypted; protocol="application/pgp-encrypted"; boundary="${encBoundary}"`,
-        `MIME-Version: 1.0`,
-        '',
-        `--${encBoundary}`,
-        `Content-Type: application/pgp-encrypted`,
-        `Content-Description: PGP/MIME version identification`,
-        '',
-        `Version: 1`,
-        '',
-        `--${encBoundary}`,
-        `Content-Type: application/octet-stream; name="encrypted.asc"`,
-        `Content-Description: OpenPGP encrypted message`,
-        `Content-Disposition: inline; filename="encrypted.asc"`,
-        '',
-        armored,
-        '',
-        `--${encBoundary}--`
-    ].join('\r\n');
-
-    await ctx.sendRaw(ctx.credentials.email, [toEmail], rawEmail);
+    });
     log.info('messaging', `Sent ${logLabel} "${filename}" (${mimeType}) to ${toEmail} [${msgId}]`);
     return msgId;
 }
@@ -428,7 +234,7 @@ export async function sendFile(
     mimeType: string,
     caption = ''
 ): Promise<string> {
-    return sendAttachmentMessage(ctx, toEmail, filename, base64Data, mimeType, caption, [], '📎', 'file');
+    return sendAttachmentMessage(ctx, toEmail, filename, base64Data, mimeType, caption, [], 'file');
 }
 
 /** Send encrypted image (Viewtype::Image) — same wire format, image/* MIME type */
@@ -440,7 +246,43 @@ export async function sendImage(
     mimeType = 'image/jpeg',
     caption = ''
 ): Promise<string> {
-    return sendAttachmentMessage(ctx, toEmail, filename, base64Data, mimeType, caption, [], '🖼️', 'image');
+    return sendAttachmentMessage(ctx, toEmail, filename, base64Data, mimeType, caption, [], 'image');
+}
+
+/**
+ * Send sticker (Viewtype::Sticker).
+ * Wire: image attachment + `Chat-Content: sticker` (core-compatible).
+ */
+export async function sendSticker(
+    ctx: SDKContext,
+    toEmail: string,
+    base64Data: string,
+    mimeType = 'image/webp',
+    filename = 'sticker.webp',
+): Promise<string> {
+    return sendAttachmentMessage(
+        ctx, toEmail, filename, base64Data, mimeType, '',
+        ['Chat-Content: sticker'],
+        'sticker',
+    );
+}
+
+/**
+ * Send animated GIF (Viewtype::Gif).
+ * Wire: image/gif attachment (optionally tagged Chat-Content: gif).
+ */
+export async function sendGif(
+    ctx: SDKContext,
+    toEmail: string,
+    base64Data: string,
+    filename = 'image.gif',
+    caption = '',
+): Promise<string> {
+    return sendAttachmentMessage(
+        ctx, toEmail, filename, base64Data, 'image/gif', caption,
+        ['Chat-Content: gif'],
+        'gif',
+    );
 }
 
 /** Send encrypted video (Viewtype::Video) — includes Chat-Duration */
@@ -454,7 +296,7 @@ export async function sendVideo(
     durationMs = 0
 ): Promise<string> {
     const extra = durationMs > 0 ? [`Chat-Duration: ${durationMs}`] : [];
-    return sendAttachmentMessage(ctx, toEmail, filename, base64Data, mimeType, caption, extra, '🎬', 'video');
+    return sendAttachmentMessage(ctx, toEmail, filename, base64Data, mimeType, caption, extra, 'video');
 }
 
 /** Send encrypted audio (Viewtype::Audio) — non-voice, includes Chat-Duration */
@@ -468,7 +310,7 @@ export async function sendAudio(
     durationMs = 0
 ): Promise<string> {
     const extra = durationMs > 0 ? [`Chat-Duration: ${durationMs}`] : [];
-    return sendAttachmentMessage(ctx, toEmail, filename, base64Data, mimeType, caption, extra, '🎵', 'audio');
+    return sendAttachmentMessage(ctx, toEmail, filename, base64Data, mimeType, caption, extra, 'audio');
 }
 
 // ─── Voice Message ──────────────────────────────────────────────────────────────
@@ -483,7 +325,7 @@ export async function sendVoice(
 ): Promise<string> {
     const extra = ['Chat-Voice-Message: 1'];
     if (durationMs > 0) extra.push(`Chat-Duration: ${durationMs}`);
-    return sendAttachmentMessage(ctx, toEmail, 'voice-message.ogg', base64AudioData, mimeType, '', extra, '🎤', 'voice');
+    return sendAttachmentMessage(ctx, toEmail, 'voice-message.ogg', base64AudioData, mimeType, '', extra, 'voice');
 }
 
 // ─── Forward ────────────────────────────────────────────────────────────────────
@@ -500,4 +342,83 @@ export async function forwardMessage(
 ): Promise<string> {
     const fwdText = `---------- Forwarded message ----------\r\nFrom: ${originalFrom}\r\n\r\n${originalText}`;
     return sendTextMessage(ctx, toEmail, fwdText);
+}
+
+// ─── Read receipts (MDN-style) ───────────────────────────────────────────────────
+
+/**
+ * Send a read receipt for an original message.
+ * Wire: encrypted payload with Chat-Disposition: display + Original-Message-ID.
+ * Matches Delta Chat's disposition-notification pattern over Autocrypt mail.
+ */
+export async function sendReadReceipt(
+    ctx: SDKContext,
+    toEmail: string,
+    originalMsgId: string,
+): Promise<string> {
+    const fromHeader = buildFromHeader(ctx);
+    const innerMime = buildInnerText(
+        [
+            `Content-Type: text/plain; charset="utf-8"; protected-headers="v1"`,
+            fromHeader,
+            `To: ${bracketEmail(toEmail)}`,
+            `Chat-Version: 1.0`,
+            `Chat-Disposition: display`,
+            `Original-Message-ID: ${originalMsgId}`,
+            `In-Reply-To: ${originalMsgId}`,
+        ],
+        '',
+    );
+
+    const msgId = await sendEncryptedMime(ctx, {
+        toEmail,
+        outerHeaders: [
+            `Chat-Disposition: display`,
+            `Original-Message-ID: ${originalMsgId}`,
+            `In-Reply-To: ${originalMsgId}`,
+        ],
+        innerMime,
+        fromHeader,
+    });
+    log.info('messaging', `Sent read receipt for ${originalMsgId} → ${toEmail}`);
+    return msgId;
+}
+
+/** Header value for requesting read receipts on outbound messages */
+export function dispositionNotificationHeader(ctx: SDKContext): string {
+    return `Chat-Disposition-Notification-To: ${ctx.credentials.email}`;
+}
+
+/**
+ * Propagate 1:1 ephemeral timer change.
+ * Wire: Chat-Ephemeral-Timer: <seconds>
+ */
+export async function sendEphemeralTimer(
+    ctx: SDKContext,
+    toEmail: string,
+    seconds: number,
+): Promise<string> {
+    const fromHeader = buildFromHeader(ctx);
+    const header = `Chat-Ephemeral-Timer: ${Math.max(0, Math.floor(seconds))}`;
+    const text = seconds > 0
+        ? `Disappearing messages set to ${seconds}s.`
+        : 'Disappearing messages off.';
+    const innerMime = buildInnerText(
+        [
+            `Content-Type: text/plain; charset="utf-8"; protected-headers="v1"`,
+            fromHeader,
+            `To: ${bracketEmail(toEmail)}`,
+            `Chat-Version: 1.0`,
+            header,
+        ],
+        text,
+    );
+    const msgId = await sendEncryptedMime(ctx, {
+        toEmail,
+        outerHeaders: [header],
+        innerMime,
+        fromHeader,
+    });
+    log.info('messaging', `Sent ephemeral timer ${seconds}s → ${toEmail}`);
+    return msgId;
 }

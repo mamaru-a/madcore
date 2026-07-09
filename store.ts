@@ -3,6 +3,18 @@
 
 // ─── Data Types ─────────────────────────────────────────────────────────────────
 
+/** Draft message saved for a chat (local only) */
+export interface ChatDraft {
+    text?: string;
+    /** Optional pending attachment (base64) */
+    file?: {
+        data: string;
+        filename: string;
+        mimeType: string;
+    };
+    updatedAt: number;
+}
+
 export interface StoredChat {
     id: string;              // peerEmail (1:1) or group-id
     name: string;            // Display name
@@ -17,6 +29,10 @@ export interface StoredChat {
     archived: boolean;
     pinned: boolean;
     muted: boolean;
+    /** Local draft (not synced) */
+    draft?: ChatDraft;
+    /** Ephemeral timer in seconds (0 = off) */
+    ephemeralTimer?: number;
 }
 
 export interface StoredMessage {
@@ -29,8 +45,9 @@ export interface StoredMessage {
     encrypted: boolean;
     direction: 'incoming' | 'outgoing';
 
-    // ── Message type ──
+    // ── Message type (aligned with Viewtype + control kinds; see lib/viewtype.ts) ──
     type: 'text' | 'image' | 'file' | 'video' | 'audio' | 'voice'
+        | 'gif' | 'sticker' | 'webxdc' | 'html' | 'location' | 'call'
         | 'reaction' | 'delete' | 'edit' | 'securejoin' | 'system';
 
     // ── Lifecycle timestamps ──
@@ -68,6 +85,8 @@ export interface StoredMessage {
     reactionTarget?: string;  // Message-ID of reaction target (for type='reaction')
     editTarget?: string;      // Message-ID of edit target (for type='edit')
     avatarUpdate?: string | null;
+    /** Absolute ms timestamp when ephemeral message should be deleted locally */
+    ephemeralExpiresAt?: number;
 }
 
 export interface StoredContact {
@@ -78,6 +97,8 @@ export interface StoredContact {
     publicKeyArmored?: string;
     verified: boolean;
     lastSeen?: number;
+    /** When true, inbound messages from this contact are dropped */
+    blocked?: boolean;
 }
 
 export interface StoredAccount {
@@ -91,6 +112,22 @@ export interface StoredAccount {
     autocryptKeydata: string;
     profilePhotoB64?: string;
     profilePhotoMime?: string;
+    /** Local config bag (key → string value) */
+    config?: Record<string, string>;
+    /** Extra relays for multi-relay accounts */
+    relays?: Array<{ id: string; serverUrl: string; email: string; password: string }>;
+}
+
+/** Webxdc status updates keyed by instance message id */
+export interface StoredWebxdcUpdate {
+    instanceMsgId: string;
+    serial: number;
+    payload: unknown;
+    info?: string;
+    summary?: string;
+    document?: string;
+    from: string;
+    at: number;
 }
 
 // ─── Store Interface ────────────────────────────────────────────────────────────

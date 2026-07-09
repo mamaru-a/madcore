@@ -289,11 +289,10 @@ await acc.sendMessage(bob, 'Hello!');
 
 ---
 
-## Multi-Relay (Future)
+## Multi-Relay
 
-> **Note:** Multi-relay support is built into the SDK architecture but is not
-> the primary workflow yet. Each account currently uses a single relay.
-> When multi-relay is needed, the API is ready:
+Accounts can hold multiple chatmail identities and keep several WebSocket
+transports open. Relays are persisted via `saveToStore` / `loadFromStore`.
 
 ```ts
 // Register on a second server
@@ -312,6 +311,47 @@ await alice.connect('https://relay2.example');
 alice.listRelays();              // → RelayInfo[]
 alice.getRelay(relay2.id);       // → RelayInfo | undefined
 alice.removeRelay(relay2.id);    // disconnects + removes
+```
+
+## Drafts, ephemeral, avatars
+
+```ts
+await acc.setDraft(chatId, { text: 'unsent…' });
+await acc.getDraft(chatId);
+await acc.removeDraft(chatId);
+
+await acc.setChatEphemeralTimer(chatId, 60); // seconds; 0 = off
+await acc.sweepEphemeralMessages();          // call periodically
+
+await acc.setChatProfileImage(groupId, { data: b64, mimeType: 'image/jpeg' });
+await acc.removeChatProfileImage(groupId);
+```
+
+## Webxdc, location, calls
+
+```ts
+await acc.sendWebxdc(bob, { data: xdcBase64, name: 'Chess' });
+await acc.sendWebxdcStatusUpdate(bob, instanceMsgId, { payload: { move: 'e2e4' } });
+
+await acc.sendLocationsToChat(bob.email, { durationSec: 600 });
+await acc.setLocation({ lat: 52.5, lon: 13.4 });
+await acc.stopSendingLocations(bob.email);
+
+const call = await acc.placeOutgoingCall(bob, { video: true, sdpOffer });
+await acc.acceptIncomingCall(call.callId, { sdpAnswer });
+await acc.endCall(call.callId);
+acc.setIceServers([{ urls: 'stun:stun.l.google.com:19302' }]);
+```
+
+## Backup & config
+
+```ts
+const json = await acc.exportBackup({ passphrase: 'optional' });
+await other.importBackup(json, { passphrase: 'optional' });
+
+await acc.setConfig('watched_mailboxes', 'INBOX,Sent');
+acc.setWatchedMailboxes(['INBOX', 'DeltaChat']);
+await acc.backgroundFetch(0);
 ```
 
 ---

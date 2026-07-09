@@ -97,12 +97,12 @@ export class Transport {
     // ─── Fetch Messages ─────────────────────────────────────────────────
 
     /** List messages since a UID. WS preferred, REST fallback. */
-    async fetchMessages(sinceUID = 0): Promise<IncomingMessage[]> {
+    async fetchMessages(sinceUID = 0, mailbox = 'INBOX'): Promise<IncomingMessage[]> {
         if (this.isConnected) {
-            return this.wsRequest('list_messages', { mailbox: 'INBOX', since_uid: sinceUID });
+            return this.wsRequest('list_messages', { mailbox, since_uid: sinceUID });
         }
         const res = await fetch(
-            `${this.serverUrl}/webimap/messages?mailbox=INBOX&since_uid=${sinceUID}`,
+            `${this.serverUrl}/webimap/messages?mailbox=${encodeURIComponent(mailbox)}&since_uid=${sinceUID}`,
             { headers: this.authHeaders(), ...this.fetchOpts() }
         );
         if (!res.ok) throw new Error(`Fetch failed: ${res.status}`);
@@ -110,12 +110,12 @@ export class Transport {
     }
 
     /** Fetch a single message by UID. WS preferred, REST fallback. */
-    async fetchMessage(uid: number): Promise<IncomingMessage> {
+    async fetchMessage(uid: number, mailbox = 'INBOX'): Promise<IncomingMessage> {
         if (this.isConnected) {
-            return this.wsRequest('fetch', { mailbox: 'INBOX', uid });
+            return this.wsRequest('fetch', { mailbox, uid });
         }
         const res = await fetch(
-            `${this.serverUrl}/webimap/message/${uid}?mailbox=INBOX`,
+            `${this.serverUrl}/webimap/message/${uid}?mailbox=${encodeURIComponent(mailbox)}`,
             { headers: this.authHeaders(), ...this.fetchOpts() }
         );
         if (!res.ok) throw new Error(`Fetch message ${uid} failed: ${res.status}`);
@@ -221,11 +221,12 @@ export class Transport {
 
     // ─── Account Registration (REST only) ───────────────────────────────
 
-    /** Register a new account on the server */
-    async register(serverUrl: string): Promise<Credentials> {
+    /** Register a new account on the server. Supports optional {token} per madmail POST /new. */
+    async register(serverUrl: string, options: { token?: string } = {}): Promise<Credentials & { dclogin_url?: string }> {
         this.serverUrl = serverUrl;
         const res = await fetch(`${serverUrl}/new`, {
             method: 'POST',
+            ...(options.token ? { headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ token: options.token }) } : {}),
             ...this.fetchOpts(),
         });
         if (!res.ok) {
@@ -233,6 +234,6 @@ export class Transport {
         }
         const data = await res.json();
         this.credentials = { email: data.email, password: data.password };
-        return this.credentials;
+        return { email: data.email, password: data.password, dclogin_url: data.dclogin_url };
     }
 }
