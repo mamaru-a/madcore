@@ -80,13 +80,14 @@ Choose your entry point based on your needs:
 - **[SecureJoin Handshake](./docs/security.md#securejoin-handshake)** — QR-code / URI verification protocol.
 - **[Multi-Device Sync](./docs/security.md#multi-device-synchronization)** — State consistency across devices.
 - **[Media Processing](./docs/security.md#media-processing)** — Base64 handling, MIME parsing, and attachments.
+- **[Core parity map](./docs/parity.md)** — madcore-web API vs Delta Chat core RPC.
 
 ### Level 4: Architecture & Protocol Internals
 *Core contributors and protocol researchers.*
 - **[WebSocket Protocol](./docs/architecture.md#the-websocket-protocol)** — JSON-RPC message structure and actions.
 - **[UID System](./docs/architecture.md#the-uid-system)** — Message tracking and synchronization.
-- **[Module Layout](./docs/architecture.md#package-layout)** — `lib/transport.ts`, `lib/crypto.ts`, `lib/mime.ts`, and more.
-- **[Developing Extensions](./docs/architecture.md#developing-extensions)** — Webxdc support and custom storage.
+- **[Module Layout](./docs/architecture.md#package-layout)** — `lib/transport.ts`, `lib/mime-build.ts`, `lib/webxdc.ts`, and more.
+- **[Developing Extensions](./docs/architecture.md#developing-extensions)** — Webxdc, calls, location, custom storage.
 
 ---
 

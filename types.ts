@@ -45,7 +45,14 @@ export interface SDKConfig {
  * | `File` | Any file attachment (PDF, DOC, etc.) |
  * | `Sticker` | Sticker image |
  */
-export type Viewtype = 'Text' | 'Image' | 'Gif' | 'Audio' | 'Voice' | 'Video' | 'File' | 'Sticker';
+export type Viewtype = 'Text' | 'Image' | 'Gif' | 'Audio' | 'Voice' | 'Video' | 'File' | 'Sticker' | 'Webxdc';
+
+/** Connectivity enum inspired by core's dc_get_connectivity */
+export type Connectivity =
+    | 'not_connected'
+    | 'connecting'
+    | 'working'
+    | 'connected';
 
 /**
  * Credentials returned by the server after registration.
@@ -327,6 +334,56 @@ export interface ParsedMessage {
     isEdit: boolean;
 
     /**
+     * `true` if this is a read-receipt / disposition notification.
+     * Not shown as a chat bubble; updates the original message's seen state.
+     */
+    isReadReceipt?: boolean;
+
+    /**
+     * Original Message-ID this read receipt refers to.
+     * Only set when `isReadReceipt` is true.
+     */
+    readReceiptFor?: string;
+
+    /**
+     * Ephemeral timer in seconds from `Chat-Ephemeral-Timer` (present when timer changes).
+     */
+    ephemeralTimer?: number;
+
+    /**
+     * Group avatar update:
+     * - data URI string when set
+     * - null when removed
+     * - undefined when not an avatar message
+     */
+    groupAvatarUpdate?: string | null;
+
+    /**
+     * `true` if this is a sticker (`Chat-Content: sticker`).
+     */
+    isSticker?: boolean;
+
+    /**
+     * `true` if this is a GIF (`Chat-Content: gif` or image/gif attachment).
+     */
+    isGif?: boolean;
+
+    /** Webxdc app instance attachment */
+    isWebxdc?: boolean;
+    /** Webxdc status update (not a new instance) */
+    isWebxdcStatus?: boolean;
+    /** Location point or stream control */
+    isLocation?: boolean;
+    /** Call signaling message */
+    isCall?: boolean;
+
+    /**
+     * Best-effort viewtype for UI (Text/Image/Gif/Sticker/…).
+     * Control messages may omit this.
+     */
+    viewtype?: Viewtype;
+
+    /**
      * The Message-ID being edited (from `Chat-Edit` header).
      * Only present when `isEdit` is `true`.
      */
@@ -355,12 +412,17 @@ export interface ParsedMessage {
  * | `DC_EVENT_INCOMING_MSG` | New message received and decrypted |
  * | `DC_EVENT_INCOMING_REACTION` | Emoji reaction received |
  * | `DC_EVENT_MSG_DELETED` | Message delete request received |
+ * | `DC_EVENT_MSG_READ` | Peer read receipt for an outgoing message |
  * | `DC_EVENT_MSGS_CHANGED` | Messages in a chat changed |
  * | `DC_EVENT_SECUREJOIN_INVITER_PROGRESS` | SecureJoin progress (inviter side) |
  * | `DC_EVENT_SECUREJOIN_JOINER_PROGRESS` | SecureJoin progress (joiner side) |
  * | `DC_EVENT_SELFAVATAR_CHANGED` | Own avatar changed |
  * | `DC_EVENT_CONTACTS_CHANGED` | Contact info updated (name, avatar) |
  * | `DC_EVENT_REACTIONS_CHANGED` | Reactions on a message changed |
+ * | `DC_EVENT_WEBXDC_STATUS_UPDATE` | Webxdc status update received |
+ * | `DC_EVENT_LOCATION_CHANGED` | Location point or stream update |
+ * | `DC_EVENT_INCOMING_CALL` | Incoming call signal |
+ * | `DC_EVENT_CALL_ENDED` | Call ended |
  * | `DC_EVENT_CONNECTIVITY_CHANGED` | WebSocket connected/disconnected |
  * | `DC_EVENT_INFO` | Informational log message |
  * | `DC_EVENT_WARNING` | Warning log message |
@@ -370,16 +432,43 @@ export type DCEvent =
     | 'DC_EVENT_INCOMING_MSG'
     | 'DC_EVENT_INCOMING_REACTION'
     | 'DC_EVENT_MSG_DELETED'
+    | 'DC_EVENT_MSG_READ'
     | 'DC_EVENT_MSGS_CHANGED'
     | 'DC_EVENT_SECUREJOIN_INVITER_PROGRESS'
     | 'DC_EVENT_SECUREJOIN_JOINER_PROGRESS'
     | 'DC_EVENT_SELFAVATAR_CHANGED'
     | 'DC_EVENT_CONTACTS_CHANGED'
     | 'DC_EVENT_REACTIONS_CHANGED'
+    | 'DC_EVENT_WEBXDC_STATUS_UPDATE'
+    | 'DC_EVENT_LOCATION_CHANGED'
+    | 'DC_EVENT_INCOMING_CALL'
+    | 'DC_EVENT_CALL_ENDED'
     | 'DC_EVENT_CONNECTIVITY_CHANGED'
     | 'DC_EVENT_INFO'
     | 'DC_EVENT_WARNING'
     | 'DC_EVENT_ERROR';
+
+/** Exhaustive list of SDK events (keep in sync with `DCEvent`) */
+export const ALL_DC_EVENTS: readonly DCEvent[] = [
+    'DC_EVENT_INCOMING_MSG',
+    'DC_EVENT_INCOMING_REACTION',
+    'DC_EVENT_MSG_DELETED',
+    'DC_EVENT_MSG_READ',
+    'DC_EVENT_MSGS_CHANGED',
+    'DC_EVENT_SECUREJOIN_INVITER_PROGRESS',
+    'DC_EVENT_SECUREJOIN_JOINER_PROGRESS',
+    'DC_EVENT_SELFAVATAR_CHANGED',
+    'DC_EVENT_CONTACTS_CHANGED',
+    'DC_EVENT_REACTIONS_CHANGED',
+    'DC_EVENT_WEBXDC_STATUS_UPDATE',
+    'DC_EVENT_LOCATION_CHANGED',
+    'DC_EVENT_INCOMING_CALL',
+    'DC_EVENT_CALL_ENDED',
+    'DC_EVENT_CONNECTIVITY_CHANGED',
+    'DC_EVENT_INFO',
+    'DC_EVENT_WARNING',
+    'DC_EVENT_ERROR',
+] as const;
 
 /**
  * Data payload for SDK events.
@@ -516,6 +605,22 @@ export type WSAction =
     | 'delete_mailbox'
     | 'rename_mailbox';
 
+/** Exhaustive list of relay WebSocket actions (keep in sync with `WSAction`) */
+export const ALL_WS_ACTIONS: readonly WSAction[] = [
+    'send',
+    'fetch',
+    'list_mailboxes',
+    'list_messages',
+    'flags',
+    'delete',
+    'move',
+    'copy',
+    'search',
+    'create_mailbox',
+    'delete_mailbox',
+    'rename_mailbox',
+] as const;
+
 /**
  * Mailbox information returned by `list_mailboxes`.
  */
@@ -562,3 +667,32 @@ export interface MessageDetail {
  * - `set`: Replace all flags with the specified set
  */
 export type FlagOperation = 'add' | 'remove' | 'set';
+
+// ─── Admin Resources ──────────────────────────────────────────────────────────
+
+export interface AdminPushStatus {
+  enabled: boolean;
+  mode?: string;
+  successful_notifications?: number;
+  failed_notifications?: number;
+  last_error?: string | null;
+  [key: string]: any;
+}
+
+export interface AdminStatusResponse {
+  imap_sessions?: Array<any> | number;
+  push?: AdminPushStatus;
+  [key: string]: any;
+}
+
+export interface AdminOverviewResponse {
+  disk?: {
+    used_bytes?: number;
+    total_bytes?: number;
+    free_bytes?: number;
+    [key: string]: any;
+  };
+  registration_tokens?: Array<any>;
+  settings?: Record<string, any>;
+  [key: string]: any;
+}

@@ -17,14 +17,22 @@ madcore-web/
     ├── index.ts       # Internal module re-exports
     ├── transport.ts   # WebSocket / REST network layer
     ├── crypto.ts      # OpenPGP key management
-    ├── mime.ts        # RFC 2822 parsing & construction
-    ├── messaging.ts   # send() target resolution & payloads
-    ├── securejoin.ts  # QR / URI handshake state machine
-    ├── group.ts       # Groups & broadcast channels
+    ├── mime.ts        # RFC 2822 parsing
+    ├── mime-build.ts  # Shared PGP/MIME envelope builders
+    ├── messaging.ts   # 1:1 send helpers (text, media, MDN, …)
+    ├── securejoin.ts  # QR / URI handshake + checkQr
+    ├── group.ts       # Groups, broadcast, group actions
+    ├── viewtype.ts    # Viewtype ↔ store type mapping
+    ├── webxdc.ts      # Webxdc apps + status updates
+    ├── backup.ts      # Export/import encrypted backup
+    ├── location.ts    # Location streaming
+    ├── calls.ts       # WebRTC call signaling
     ├── profile.ts     # Display name & avatar handling
     ├── context.ts     # Per-account runtime context
     └── logger.ts      # Configurable log levels
 ```
+
+
 
 ## The WebSocket Protocol
 
@@ -131,10 +139,16 @@ The SDK is store-agnostic. Any object implementing the `IDeltaChatStore` interfa
 ## Developing Extensions
 
 ### Webxdc Support
-Webxdc ("Apps in Chat") allows developers to build full-blown web applications that live inside any Delta Chat conversation.
+Webxdc ("Apps in Chat") is implemented in `lib/webxdc.ts`:
 
-- **The SDK and Webxdc:** The SDK provides a low-level API for sending and receiving Webxdc-specific payloads.
-- **Exposing the API:** Future versions of the SDK will include a dedicated `WebxdcManager` to simplify sending game/app state updates across a group chat.
+- `sendWebxdc` — send an `.xdc` attachment (`application/webxdc`, `Chat-Content: app`)
+- `sendWebxdcStatusUpdate` / `getWebxdcStatusUpdates` — JSON status updates keyed by instance Message-ID
+- Event: `DC_EVENT_WEBXDC_STATUS_UPDATE`
+
+Realtime Webxdc channels are not yet implemented.
+
+### Shared MIME builders
+`lib/mime-build.ts` is the single place that constructs PGP/MIME envelopes for 1:1 and group fan-out.
 
 ### Custom Transports
 While Madcore Web defaults to the Delta Chat WebSocket Relay, it can be extended with custom `Transport` implementations (e.g., to bridge into other messaging protocols).
