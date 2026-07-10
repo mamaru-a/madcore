@@ -8,10 +8,10 @@
  *   Phase 4: Inviter sends vc-contact-confirm (encrypted)
  */
 
-import type { SDKContext } from './context';
-import type { ParsedMessage, SecureJoinParsed } from '../types';
-import { log } from './logger';
-import { buildFromHeader, buildPgpMimeEnvelope } from './mime-build';
+import type { SDKContext } from './context.js';
+import type { ParsedMessage, SecureJoinParsed } from '../types.js';
+import { log } from './logger.js';
+import { buildFromHeader, buildPgpMimeEnvelope } from './mime-build.js';
 
 const crypto = globalThis.crypto;
 

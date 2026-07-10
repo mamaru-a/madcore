@@ -1,17 +1,17 @@
 /**
  * AccountInbox — inbound message pipeline and chat/store management.
  */
-import type { StoredChat, StoredMessage, StoredContact, ChatDraft } from '../store';
-import * as mimeLib from '../lib/mime';
-import * as messagingLib from '../lib/messaging';
-import * as groupLib from '../lib/group';
-import * as webxdcLib from '../lib/webxdc';
-import * as locationLib from '../lib/location';
-import * as callsLib from '../lib/calls';
-import { viewtypeToStoreType } from '../lib/viewtype';
-import type { IncomingMessage, ParsedMessage } from '../types';
-import { log } from '../lib/logger';
-import { AccountProfile } from './profile';
+import type { StoredChat, StoredMessage, StoredContact, ChatDraft } from '../store.js';
+import * as mimeLib from '../lib/mime.js';
+import * as messagingLib from '../lib/messaging.js';
+import * as groupLib from '../lib/group.js';
+import * as webxdcLib from '../lib/webxdc.js';
+import * as locationLib from '../lib/location.js';
+import * as callsLib from '../lib/calls.js';
+import { viewtypeToStoreType } from '../lib/viewtype.js';
+import type { IncomingMessage, ParsedMessage } from '../types.js';
+import { log } from '../lib/logger.js';
+import { AccountProfile } from './profile.js';
 
 export abstract class AccountInbox extends AccountProfile {
     /**

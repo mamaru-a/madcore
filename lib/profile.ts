@@ -8,9 +8,9 @@
  *   - Broadcasting profile photo to all known contacts
  */
 
-import type { SDKContext } from './context';
-import { log } from './logger';
-import { buildFromHeader, buildPgpMimeEnvelope, foldBase64 } from './mime-build';
+import type { SDKContext } from './context.js';
+import { log } from './logger.js';
+import { buildFromHeader, buildPgpMimeEnvelope, foldBase64 } from './mime-build.js';
 
 // ─── Display Name ───────────────────────────────────────────────────────────────
 

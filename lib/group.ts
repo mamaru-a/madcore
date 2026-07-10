@@ -13,17 +13,17 @@
  * Broadcasts: one-way channels where only the creator can send
  */
 
-import type { SDKContext } from './context';
-import * as cryptoLib from './crypto';
+import type { SDKContext } from './context.js';
+import * as cryptoLib from './crypto.js';
 import * as openpgp from 'openpgp';
-import * as sj from './securejoin';
-import { log } from './logger';
+import * as sj from './securejoin.js';
+import { log } from './logger.js';
 import {
     buildFromHeader,
     buildInnerMultipart,
     buildInnerText,
     buildPgpMimeEnvelope,
-} from './mime-build';
+} from './mime-build.js';
 
 const crypto = globalThis.crypto;
 

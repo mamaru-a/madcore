@@ -8,14 +8,14 @@
  *   { type: 'offer'|'answer'|'ice'|'end', callId, sdp?, candidate?, video? }
  */
 
-import type { SDKContext } from './context';
+import type { SDKContext } from './context.js';
 import {
     buildFromHeader,
     buildInnerText,
     bracketEmail,
     sendEncryptedMime,
-} from './mime-build';
-import { log } from './logger';
+} from './mime-build.js';
+import { log } from './logger.js';
 
 export type CallSignalType = 'offer' | 'answer' | 'ice' | 'end' | 'ring';
 

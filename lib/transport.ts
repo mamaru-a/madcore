@@ -9,8 +9,8 @@
  * They never import WebSocket or call fetch directly.
  */
 
-import type { Credentials, IncomingMessage } from '../types';
-import { log } from './logger';
+import type { Credentials, IncomingMessage } from '../types.js';
+import { log } from './logger.js';
 
 export type TransportState = 'disconnected' | 'connecting' | 'connected';
 

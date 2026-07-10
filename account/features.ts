@@ -2,15 +2,15 @@
  * AccountFeatures — webxdc, backup, config, location, calls, connectivity.
  */
 import * as openpgp from 'openpgp';
-import type { StoredMessage, StoredContact } from '../store';
-import * as cryptoLib from '../lib/crypto';
-import * as webxdcLib from '../lib/webxdc';
-import * as backupLib from '../lib/backup';
-import * as locationLib from '../lib/location';
-import * as callsLib from '../lib/calls';
-import type { Connectivity } from '../types';
-import { log } from '../lib/logger';
-import { AccountInbox } from './inbox';
+import type { StoredMessage, StoredContact } from '../store.js';
+import * as cryptoLib from '../lib/crypto.js';
+import * as webxdcLib from '../lib/webxdc.js';
+import * as backupLib from '../lib/backup.js';
+import * as locationLib from '../lib/location.js';
+import * as callsLib from '../lib/calls.js';
+import type { Connectivity } from '../types.js';
+import { log } from '../lib/logger.js';
+import { AccountInbox } from './inbox.js';
 
 export abstract class AccountFeatures extends AccountInbox {
     // WEBXDC

@@ -6,11 +6,11 @@
  *
  * @example
  * ```ts
- * import type { ParsedMessage, DCEvent, Credentials } from './types';
+ * import type { ParsedMessage, DCEvent, Credentials } from './types.js';
  * ```
  */
 
-import type { IDeltaChatStore, StoredChat, StoredMessage, StoredContact } from './store';
+import type { IDeltaChatStore, StoredChat, StoredMessage, StoredContact } from './store.js';
 
 // ─── SDK Configuration ──────────────────────────────────────────────────────────
 

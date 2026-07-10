@@ -3,16 +3,16 @@
  * Feature layers extend this class.
  */
 import * as openpgp from 'openpgp';
-import { log, addLogSink } from '../lib/logger';
-import { IndexedDBStore, type IDeltaChatStore, type StoredChat, type StoredMessage, type StoredContact, type StoredAccount, type StoredGroup } from '../store';
-import { Transport } from '../lib/transport';
-import * as cryptoLib from '../lib/crypto';
-import { foldBase64 } from '../lib/mime-build';
-import type { WebxdcStatusUpdate } from '../lib/webxdc';
-import type { LocationStreamState, LocationPoint } from '../lib/location';
-import type { CallSession, IceServer } from '../lib/calls';
-import type { GroupInfo } from '../lib/group';
-import type { SDKContext } from '../lib/context';
+import { log, addLogSink } from '../lib/logger.js';
+import { IndexedDBStore, type IDeltaChatStore, type StoredChat, type StoredMessage, type StoredContact, type StoredAccount, type StoredGroup } from '../store.js';
+import { Transport } from '../lib/transport.js';
+import * as cryptoLib from '../lib/crypto.js';
+import { foldBase64 } from '../lib/mime-build.js';
+import type { WebxdcStatusUpdate } from '../lib/webxdc.js';
+import type { LocationStreamState, LocationPoint } from '../lib/location.js';
+import type { CallSession, IceServer } from '../lib/calls.js';
+import type { GroupInfo } from '../lib/group.js';
+import type { SDKContext } from '../lib/context.js';
 import type {
     Credentials,
     AccountStatus,
@@ -21,8 +21,8 @@ import type {
     ParsedMessage,
     DCEvent,
     DCEventData,
-} from '../types';
-import { generateAccountId } from './utils';
+} from '../types.js';
+import { generateAccountId } from './utils.js';
 
 export abstract class AccountBase {
     // ── Identity ──

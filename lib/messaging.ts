@@ -1,4 +1,4 @@
-import { log } from './logger';
+import { log } from './logger.js';
 
 /**
  * lib/messaging.ts — All outbound message functions extracted from sdk.ts
@@ -17,7 +17,7 @@ import { log } from './logger';
  *   - forwardMessage → "---------- Forwarded message ----------" prefix
  */
 
-import type { SDKContext } from './context';
+import type { SDKContext } from './context.js';
 import {
     buildFromHeader,
     buildInnerMultipart,
@@ -25,7 +25,7 @@ import {
     buildPgpMimeEnvelope,
     bracketEmail,
     sendEncryptedMime,
-} from './mime-build';
+} from './mime-build.js';
 
 // ─── Text Message ───────────────────────────────────────────────────────────────
 

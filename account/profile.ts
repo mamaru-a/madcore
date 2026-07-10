@@ -1,11 +1,11 @@
 /**
  * AccountProfile — display name and avatar.
  */
-import type { StoredMessage, StoredContact } from '../store';
-import * as profileLib from '../lib/profile';
-import { log } from '../lib/logger';
-import { bytesToBase64 } from './utils';
-import { AccountSecureJoin } from './securejoin';
+import type { StoredMessage, StoredContact } from '../store.js';
+import * as profileLib from '../lib/profile.js';
+import { log } from '../lib/logger.js';
+import { bytesToBase64 } from './utils.js';
+import { AccountSecureJoin } from './securejoin.js';
 
 export abstract class AccountProfile extends AccountSecureJoin {
     // PROFILE (delegated to lib/profile.ts)

@@ -23,12 +23,12 @@
  *   - store.ts — Persistence backends
  */
 
-import { getFingerprintFromArmored } from './lib/crypto';
+import { getFingerprintFromArmored } from './lib/crypto.js';
 
 // ─── Core API ───────────────────────────────────────────────────────────────────
 
-export { DeltaChatSDK, type IDeltaChatManager } from './account/manager';
-export { DeltaChatAccount } from './account/account';
+export { DeltaChatSDK, type IDeltaChatManager } from './account/manager.js';
+export { DeltaChatAccount } from './account/account.js';
 
 // ─── Class layers (for extension / advanced use) ────────────────────────────────
 
@@ -41,12 +41,12 @@ export {
     AccountProfile,
     AccountInbox,
     AccountFeatures,
-} from './account';
+} from './account/index.js';
 
 // ─── Logging ────────────────────────────────────────────────────────────────────
 
-export { log, setLogLevel, getLogLevel } from './lib/logger';
-export type { LogLevel } from './lib/logger';
+export { log, setLogLevel, getLogLevel } from './lib/logger.js';
+export type { LogLevel } from './lib/logger.js';
 
 // ─── Types ──────────────────────────────────────────────────────────────────────
 
@@ -73,10 +73,10 @@ export type {
     Viewtype,
     SDKConfig,
     Connectivity,
-} from './types';
-export { ALL_DC_EVENTS, ALL_WS_ACTIONS } from './types';
+} from './types.js';
+export { ALL_DC_EVENTS, ALL_WS_ACTIONS } from './types.js';
 
-export type { GroupInfo } from './lib/group';
+export type { GroupInfo } from './lib/group.js';
 export type {
     StoredContact,
     StoredMessage,
@@ -86,18 +86,18 @@ export type {
     ChatDraft,
     IDeltaChatStore,
     PersistedAccountMeta,
-} from './store';
+} from './store.js';
 export {
     MemoryStore,
     IndexedDBStore,
     createStore,
-} from './store';
+} from './store.js';
 export {
     viewtypeToStoreType,
     storeTypeToViewtype,
     storeTypeFromMime,
-} from './lib/viewtype';
-export type { MessageStoreType } from './lib/viewtype';
-export type { QrScanResult, QrKind } from './lib/securejoin';
+} from './lib/viewtype.js';
+export type { MessageStoreType } from './lib/viewtype.js';
+export type { QrScanResult, QrKind } from './lib/securejoin.js';
 
 export { getFingerprintFromArmored };

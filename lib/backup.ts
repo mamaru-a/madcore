@@ -6,7 +6,7 @@
  * Optional passphrase: AES-GCM via Web Crypto (raw base64 envelope).
  */
 
-import type { StoredAccount, StoredChat, StoredContact, StoredMessage } from '../store';
+import type { StoredAccount, StoredChat, StoredContact, StoredMessage } from '../store.js';
 
 export const BACKUP_VERSION = 1;
 

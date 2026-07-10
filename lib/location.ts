@@ -5,14 +5,14 @@
  * Streaming is app-driven: call setLocation() while a chat is in "streaming" state.
  */
 
-import type { SDKContext } from './context';
+import type { SDKContext } from './context.js';
 import {
     buildFromHeader,
     buildInnerText,
     bracketEmail,
     sendEncryptedMime,
-} from './mime-build';
-import { log } from './logger';
+} from './mime-build.js';
+import { log } from './logger.js';
 
 export interface LocationPoint {
     lat: number;

@@ -6,7 +6,7 @@
  * webxdc, MDNs) don't re-copy envelope boilerplate.
  */
 
-import type { SDKContext } from './context';
+import type { SDKContext } from './context.js';
 
 const crypto = globalThis.crypto;
 

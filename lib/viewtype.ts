@@ -2,7 +2,7 @@
  * lib/viewtype.ts — Map between core-style Viewtype and store message types.
  */
 
-import type { Viewtype } from '../types';
+import type { Viewtype } from '../types.js';
 
 /** Store-level message type (extends media/control kinds used by StoredMessage) */
 export type MessageStoreType =

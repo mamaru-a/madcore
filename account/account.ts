@@ -5,8 +5,8 @@
  *   AccountBase → Contacts → Messaging → Groups → SecureJoin →
  *   Profile → Inbox → Features → DeltaChatAccount
  */
-import type { IDeltaChatStore } from '../store';
-import { AccountFeatures } from './features';
+import type { IDeltaChatStore } from '../store.js';
+import { AccountFeatures } from './features.js';
 
 export class DeltaChatAccount extends AccountFeatures {
     /** Static factory to load an account from a store */

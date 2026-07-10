@@ -1,9 +1,9 @@
 /**
  * AccountGroups — group/channel ops and the unified send() API.
  */
-import type { StoredMessage, StoredContact } from '../store';
-import * as groupLib from '../lib/group';
-import { AccountMessaging } from './messaging';
+import type { StoredMessage, StoredContact } from '../store.js';
+import * as groupLib from '../lib/group.js';
+import { AccountMessaging } from './messaging.js';
 
 export abstract class AccountGroups extends AccountMessaging {
     // GROUPS & BROADCASTS (delegated to lib/group.ts)

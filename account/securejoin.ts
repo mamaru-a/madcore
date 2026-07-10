@@ -1,18 +1,18 @@
 /**
  * AccountSecureJoin — QR / SecureJoin handshake.
  */
-import type { StoredContact } from '../store';
-import type { ParsedMessage } from '../types';
-import * as securejoinLib from '../lib/securejoin';
-import { log } from '../lib/logger';
-import { generateAccountId } from './utils';
-import { AccountGroups } from './groups';
+import type { StoredContact } from '../store.js';
+import type { ParsedMessage } from '../types.js';
+import * as securejoinLib from '../lib/securejoin.js';
+import { log } from '../lib/logger.js';
+import { generateAccountId } from './utils.js';
+import { AccountGroups } from './groups.js';
 
 export abstract class AccountSecureJoin extends AccountGroups {
     // SECUREJOIN (delegated to lib/securejoin.ts)
     // ═══════════════════════════════════════════════════════════════════════
 
-    parseSecureJoinURI(uri: string): import('../types').SecureJoinParsed {
+    parseSecureJoinURI(uri: string): import('../types.js').SecureJoinParsed {
         // Handle shell-escape cleanup
         uri = uri.replace(/\\([#&=])/g, '$1');
         return securejoinLib.parseSecureJoinURI(uri);

@@ -1,11 +1,11 @@
 /**
  * AccountContacts — contact registry, block list, QR helpers.
  */
-import type { StoredContact } from '../store';
-import * as securejoinLib from '../lib/securejoin';
-import { log } from '../lib/logger';
-import { generateAccountId } from './utils';
-import { AccountBase } from './base';
+import type { StoredContact } from '../store.js';
+import * as securejoinLib from '../lib/securejoin.js';
+import { log } from '../lib/logger.js';
+import { generateAccountId } from './utils.js';
+import { AccountBase } from './base.js';
 
 export abstract class AccountContacts extends AccountBase {
     // CONTACTS

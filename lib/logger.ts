@@ -2,7 +2,7 @@
  * lib/logger.ts — Structured logging with levels
  *
  * Usage:
- *   import { log, setLogLevel } from './lib/logger';
+ *   import { log, setLogLevel } from './lib/logger.js';
  *   setLogLevel('debug');
  *   log.debug('transport', 'WS frame received', data);
  *   log.info('sdk', 'Registered', email);

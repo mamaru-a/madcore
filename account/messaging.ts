@@ -1,10 +1,10 @@
 /**
  * AccountMessaging — 1:1 outbound messages (text, media, reactions, …).
  */
-import type { StoredMessage, StoredContact } from '../store';
-import * as messagingLib from '../lib/messaging';
-import * as groupLib from '../lib/group';
-import { AccountContacts } from './contacts';
+import type { StoredMessage, StoredContact } from '../store.js';
+import * as messagingLib from '../lib/messaging.js';
+import * as groupLib from '../lib/group.js';
+import { AccountContacts } from './contacts.js';
 
 export abstract class AccountMessaging extends AccountContacts {
     /** Build and persist an outgoing message, returning the result */

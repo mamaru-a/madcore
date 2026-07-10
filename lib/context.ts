@@ -4,7 +4,7 @@
  * being coupled to the SDK class itself.
  */
 import * as openpgp from 'openpgp';
-import type { Credentials, IncomingMessage, ParsedMessage } from '../types';
+import type { Credentials, IncomingMessage, ParsedMessage } from '../types.js';
 
 export interface SDKContext {
     serverUrl: string;

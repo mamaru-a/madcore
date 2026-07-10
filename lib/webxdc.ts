@@ -7,15 +7,15 @@
  *   - Status updates: Chat-Content: webxdc-status + JSON body referencing instance Message-ID
  */
 
-import type { SDKContext } from './context';
+import type { SDKContext } from './context.js';
 import {
     buildFromHeader,
     buildInnerMultipart,
     buildInnerText,
     bracketEmail,
     sendEncryptedMime,
-} from './mime-build';
-import { log } from './logger';
+} from './mime-build.js';
+import { log } from './logger.js';
 
 export interface WebxdcInfo {
     name?: string;

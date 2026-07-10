@@ -1,21 +1,21 @@
 /**
  * DeltaChatSDK multi-account manager factory.
  */
-import { log, setLogLevel } from '../lib/logger';
+import { log, setLogLevel } from '../lib/logger.js';
 import {
     createStore,
     IndexedDBStore,
     type IDeltaChatStore,
     type PersistedAccountMeta,
-} from '../store';
-import { Transport } from '../lib/transport';
+} from '../store.js';
+import { Transport } from '../lib/transport.js';
 import type {
     RegisterResult,
     AccountInfo,
     SDKConfig,
-} from '../types';
-import { generateAccountId } from './utils';
-import { DeltaChatAccount } from './account';
+} from '../types.js';
+import { generateAccountId } from './utils.js';
+import { DeltaChatAccount } from './account.js';
 
 export interface IDeltaChatManager {
     /** Register a new account on a server, returns { id, email, password } */

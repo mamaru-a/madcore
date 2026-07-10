@@ -9,10 +9,10 @@
  *   - Full incoming message parsing (decrypt + extract metadata)
  */
 
-import type { Attachment, IncomingMessage, ParsedMessage } from '../types';
-import * as cryptoLib from './crypto';
+import type { Attachment, IncomingMessage, ParsedMessage } from '../types.js';
+import * as cryptoLib from './crypto.js';
 import type * as openpgp from 'openpgp';
-import { log } from './logger';
+import { log } from './logger.js';
 
 // ─── Header Parsing ─────────────────────────────────────────────────────────────
 
@@ -394,7 +394,7 @@ export async function parseIncoming(raw: IncomingMessage, ctx: ParseContext): Pr
     const isCall = chatContent === 'call';
 
     // Best-effort viewtype for UI consumers
-    let viewtype: import('../types').Viewtype | undefined;
+    let viewtype: import('../types.js').Viewtype | undefined;
     if (isReaction || isDelete || isEdit || isSecureJoin || isReadReceipt || isWebxdcStatus || isCall) {
         viewtype = undefined;
     } else if (isWebxdc) {
