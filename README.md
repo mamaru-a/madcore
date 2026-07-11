@@ -103,26 +103,12 @@ bun run test:live-full # live E2E (needs SERVER_URL)
 ```bash
 SERVER_URL=https://relay.example
 ```
-
-### CI & publishing
-
-| Workflow | Trigger | What it does |
-|----------|---------|----------------|
-| **CI** (`.github/workflows/ci.yml`) | push / PR to `main` | typecheck, unit tests, build |
-| **Publish** (`.github/workflows/publish.yml`) | GitHub **Release** published | re-test, build, publish to **npm** and **GitHub Packages** |
-
-**Release checklist**
-
-1. Bump `"version"` in `package.json` (e.g. `2.0.1`).
-2. Commit, tag `v2.0.1`, push the tag (or create a Release in the GitHub UI for that tag).
-3. Ensure secret **`NPM_TOKEN`** is set (npm automation token with publish rights).
-4. Publish workflow will fail if the release tag version ≠ `package.json` version.
-
 **Install from registries**
 
 ```bash
 # npmjs.com
 npm install madcore
+
 
 # GitHub Packages (scoped as @<owner>/madcore)
 npm install @themadorg/madcore --registry=https://npm.pkg.github.com
