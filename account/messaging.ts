@@ -40,7 +40,7 @@ export abstract class AccountMessaging extends AccountContacts {
             const safeText = text || '';
             chat.lastMessage = safeText.substring(0, 100);
             chat.lastMessageId = msgId;
-            chat.lastMessageTime = now;
+            chat.lastMessageTime = now > 1e12 ? now : now * 1000;
             await this.store.saveChat(chat);
         }
         return { msgId, message };

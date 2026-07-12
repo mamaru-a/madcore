@@ -7,6 +7,7 @@ import { log, addLogSink } from '../lib/logger.js';
 import { IndexedDBStore, type IDeltaChatStore, type StoredChat, type StoredMessage, type StoredContact, type StoredAccount, type StoredGroup } from '../store.js';
 import { Transport } from '../lib/transport.js';
 import * as cryptoLib from '../lib/crypto.js';
+import { setKnownKey } from '../lib/crypto.js';
 import { foldBase64 } from '../lib/mime-build.js';
 import type { WebxdcStatusUpdate } from '../lib/webxdc.js';
 import type { LocationStreamState, LocationPoint } from '../lib/location.js';
@@ -181,7 +182,9 @@ export abstract class AccountBase {
             profilePhotoChanged: this.profilePhotoChanged,
             sentAvatarTo: this.sentAvatarTo,
             generateMsgId: () => this.generateMsgId(),
-            buildAutocryptHeader: () => cryptoLib.buildAutocryptHeader(this.credentials.email, this.autocryptKeydata),
+            // Autocrypt addr must match MIME From exactly (core addr_cmp; no bare-IP twin).
+            buildAutocryptHeader: () =>
+                cryptoLib.buildAutocryptHeader(this.credentials.email, this.autocryptKeydata),
             encryptRaw: (payload, recipientArmored) =>
                 cryptoLib.encryptRaw(payload, recipientArmored, this.publicKey!, this.privateKey!),
             encrypt: (text, recipientArmored, opts) =>
@@ -318,7 +321,7 @@ export abstract class AccountBase {
         // Restore known keys and contact registry from stored contacts
         for (const contact of await this.store.getAllContacts()) {
             if (contact.publicKeyArmored) {
-                this.knownKeys.set(contact.email.toLowerCase(), contact.publicKeyArmored);
+                setKnownKey(this.knownKeys, contact.email, contact.publicKeyArmored);
             }
             if (contact.avatar) {
                 this.peerAvatars.set(contact.email.toLowerCase(), contact.avatar);
@@ -330,7 +333,7 @@ export abstract class AccountBase {
                 this.blockedEmails.add(contact.email.toLowerCase());
             }
         }
-        this.knownKeys.set(acct.email.toLowerCase(), acct.publicKeyArmored || '');
+        if (acct.publicKeyArmored) setKnownKey(this.knownKeys, acct.email, acct.publicKeyArmored);
 
         // Restore groups
         this.groups.clear();
@@ -352,6 +355,13 @@ export abstract class AccountBase {
             for (const [k, v] of Object.entries(acct.config)) this.configBag.set(k, v);
             if (acct.config.watched_mailboxes) {
                 this.watchedMailboxes = acct.config.watched_mailboxes.split(',').map(s => s.trim()).filter(Boolean);
+            }
+            // SecureJoin invite tokens (inviter auto-reply needs these after reload)
+            if (acct.config.securejoin_invite) {
+                this.myInviteNumber = acct.config.securejoin_invite;
+            }
+            if (acct.config.securejoin_auth) {
+                this.myAuthToken = acct.config.securejoin_auth;
             }
         }
         if (acct.relays) {
@@ -436,7 +446,7 @@ export abstract class AccountBase {
         this.publicKey = keys.publicKey;
         this.fingerprint = keys.fingerprint;
         this.autocryptKeydata = keys.autocryptKeydata;
-        this.knownKeys.set(this.credentials.email.toLowerCase(), keys.armoredPublicKey);
+        setKnownKey(this.knownKeys, this.credentials.email, keys.armoredPublicKey);
 
         // Reconfigure all transports with updated credentials
         for (const t of this.transports.values()) {
@@ -546,6 +556,86 @@ export abstract class AccountBase {
         });
     }
 
+    /**
+     * Permanently delete this profile from the device:
+     * WebSocket disconnect, clear RAM, wipe IndexedDB (`madcore-{email}`) / memory store.
+     * Does **not** delete the account on the mail server.
+     */
+    async destroyProfile(): Promise<void> {
+        if (this.persistTimer) {
+            clearTimeout(this.persistTimer);
+            this.persistTimer = null;
+        }
+        // Stop I/O first so nothing rewrites the DB while we wipe it
+        try {
+            this.disconnect();
+        } catch {
+            /* ignore */
+        }
+        if (this.logUnsub) {
+            try {
+                this.logUnsub();
+            } catch {
+                /* ignore */
+            }
+            this.logUnsub = null as any;
+        }
+
+        const email = (() => {
+            try {
+                return this.credentials?.email?.toLowerCase() || '';
+            } catch {
+                return '';
+            }
+        })();
+
+        // Clear in-memory state
+        this.privateKey = null;
+        this.publicKey = null;
+        this.fingerprint = '';
+        this.autocryptKeydata = '';
+        this.displayName = '';
+        this.knownKeys.clear();
+        this.seenUIDs.clear();
+        this.lastSeenUid = 0;
+        this.contacts.clear();
+        this.blockedEmails.clear();
+        this.configBag.clear();
+        this.webxdcUpdates.clear();
+        this.locationStreams.clear();
+        this.locationPoints = [];
+        this.calls.clear();
+        this.iceServers = [];
+        this.watchedMailboxes = ['INBOX'];
+        this.lastTransportError = null;
+        this.emailToContactId.clear();
+        this.peerAvatars.clear();
+        this.profilePhotoB64 = '';
+        this.profilePhotoMime = '';
+        this.profilePhotoChanged = false;
+        this.sentAvatarTo.clear();
+        this.myInviteNumber = '';
+        this.myAuthToken = '';
+        this.groups.clear();
+        this.relays.clear();
+        this.primaryRelayId = '';
+        this.eventHandlers.clear();
+
+        // Wipe persistence for this account
+        try {
+            if (email && typeof this.store.wipeAccount === 'function') {
+                await this.store.wipeAccount(email);
+            } else {
+                await this.store.clear();
+                if (email) await this.store.deleteAccountByEmail(email);
+            }
+        } catch (e: any) {
+            log.warn('sdk', `destroyProfile store wipe: ${e?.message || e}`);
+        }
+
+        log.info('sdk', `Profile destroyed on device${email ? ` (${email})` : ''}`);
+    }
+
     /** Fetch messages via primary transport (WS preferred, REST fallback) */
     async fetchMessages(sinceUID = 0): Promise<IncomingMessage[]> {
         return this.transport.fetchMessages(sinceUID);
@@ -610,7 +700,7 @@ export abstract class AccountBase {
     getPublicKeyArmored(): string | null { return this.publicKey ? this.publicKey.armor() : null; }
 
     importKey(email: string, armoredKey: string) {
-        this.knownKeys.set(email.toLowerCase(), armoredKey);
+        setKnownKey(this.knownKeys, email, armoredKey);
         this.schedulePersist();
     }
 
@@ -738,7 +828,9 @@ export abstract class AccountBase {
 
     protected generateMsgId(): string {
         const id = globalThis.crypto.randomUUID().replace(/-/g, '').slice(0, 16);
-        return `<${id}@${this.credentials.email.split('@')[1]}>`;
+        // Domain-literal `@[ip]` breaks some MUAs/MTAs; use bare host like the PGP key UID.
+        const domain = (this.credentials.email.split('@')[1] || 'localhost').replace(/^\[|\]$/g, '');
+        return `<${id}@${domain}>`;
     }
 
 

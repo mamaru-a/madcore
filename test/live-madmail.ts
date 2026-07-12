@@ -226,8 +226,9 @@ async function main() {
     }
 
     try {
-        const { msgId } = await account.addDeviceMessage('live', 'Live test device note');
-        pass('addDeviceMessage', msgId);
+        const dev = await account.addDeviceMessage('live', 'Live test device note');
+        if (!dev?.msgId) throw new Error('expected device message');
+        pass('addDeviceMessage', dev.msgId);
     } catch (e: any) {
         fail('addDeviceMessage', e.message);
     }

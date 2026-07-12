@@ -98,6 +98,26 @@ export {
     storeTypeFromMime,
 } from './lib/viewtype.js';
 export type { MessageStoreType } from './lib/viewtype.js';
-export type { QrScanResult, QrKind } from './lib/securejoin.js';
+export type { QrScanResult, QrKind } from './lib/securejoin.js';export { checkQr, parseSecureJoinURI, generateSecureJoinURI } from './lib/securejoin.js';
 
 export { getFingerprintFromArmored };
+
+// ─── JSON-RPC compatibility (core wire API) ─────────────────────────────────────
+
+export {
+    DeltaChatJsonRpc,
+    createJsonRpcCompat,
+    ALL_JSONRPC_METHODS,
+    IMPLEMENTED_JSONRPC_METHODS,
+    STUB_JSONRPC_METHODS,
+    isJsonRpcMethod,
+    methodCoverage,
+    RpcError,
+    RpcNotImplemented,
+} from './jsonrpc/index.js';
+export type {
+    JsonRpcCompatOptions,
+    JsonRpcMethodName,
+    JsonRpcEvent,
+    JsonRpcEventHandler,
+} from './jsonrpc/index.js';

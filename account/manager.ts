@@ -45,8 +45,11 @@ export interface IDeltaChatManager {
     /** List all in-memory registered accounts with their IDs and emails */
     listAccounts(): AccountInfo[];
 
-    /** Remove an account from the manager by ID (does NOT delete server-side) */
-    removeAccount(id: string): void;
+    /**
+     * Remove an account from the manager and wipe all local data for it
+     * (WebSocket, RAM, IndexedDB / memory store). Does NOT delete server-side.
+     */
+    removeAccount(id: string): Promise<void>;
 
     /**
      * Root store. With IndexedDB, each account also uses an isolated
@@ -216,16 +219,53 @@ export function DeltaChatSDK(config: SDKConfig = {}): IDeltaChatManager {
             }));
         },
 
-        removeAccount(id: string): void {
+        async removeAccount(id: string): Promise<void> {
             const acc = accounts.get(id);
-            if (acc) {
-                const email = acc.getCredentials().email;
-                acc.disconnect();
-                accounts.delete(id);
+            if (!acc) return;
+            let email = '';
+            try {
+                email = acc.getCredentials().email;
+            } catch {
+                /* already torn down */
+            }
+            // Full device wipe: WS + RAM + IDB madcore-{email} + registry
+            try {
+                await acc.destroyProfile();
+            } catch (e: any) {
+                log.warn('sdk', `removeAccount destroyProfile: ${e?.message || e}`);
+                try {
+                    acc.disconnect();
+                } catch {
+                    /* ignore */
+                }
                 if (store instanceof IndexedDBStore && email) {
-                    void store.forgetAccount(email);
+                    try {
+                        await store.wipeAccount(email);
+                    } catch {
+                        try {
+                            await store.forgetAccount(email);
+                        } catch {
+                            /* ignore */
+                        }
+                    }
                 }
             }
+            accounts.delete(id);
+            // Root store wipe (covers forAccount-scoped handles that share baseName)
+            if (store instanceof IndexedDBStore && email) {
+                try {
+                    await store.wipeAccount(email);
+                } catch {
+                    /* already wiped by destroyProfile */
+                }
+            } else if (email && typeof store.wipeAccount === 'function') {
+                try {
+                    await store.wipeAccount(email);
+                } catch {
+                    /* ignore */
+                }
+            }
+            log.info('sdk', `removeAccount complete: ${id}${email ? ` / ${email}` : ''}`);
         },
     };
 }

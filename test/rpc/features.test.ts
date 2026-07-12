@@ -62,13 +62,40 @@ describe('drafts + ephemeral + avatar (store APIs)', () => {
         expect(await store.getMessage('<new@x>')).not.toBeNull();
     });
 
-    it('addDeviceMessage is local-only system chat', async () => {
-        const { msgId, message } = await acc.addDeviceMessage('welcome', 'Hello device');
-        expect(msgId).toContain('device-');
-        expect(message.type).toBe('system');
-        expect(message.chatId).toBe('device-chat');
+    it('addDeviceMessage is local-only device chat (normal message, not info/event)', async () => {
+        const first = await acc.addDeviceMessage('welcome', 'Hello device');
+        expect(first).not.toBeNull();
+        expect(first!.msgId).toContain('device-');
+        expect(first!.message.type).toBe('text');
+        expect(first!.message.chatId).toBe('device-chat');
         const msgs = await acc.getChatMessages('device-chat');
         expect(msgs.length).toBe(1);
+        // Same label → no-op (core-style dedup); no extra bubble
+        const again = await acc.addDeviceMessage('welcome', 'Hello again');
+        expect(again).toBeNull();
+        expect((await acc.getChatMessages('device-chat')).length).toBe(1);
+        // Third call still no-op
+        expect(await acc.addDeviceMessage('welcome', 'Nope')).toBeNull();
+        expect((await acc.getChatMessages('device-chat')).length).toBe(1);
+    });
+
+    it('updateDeviceChats seeds core welcome image + text + saved messages', async () => {
+        await acc.updateDeviceChats();
+        const deviceMsgs = await acc.getChatMessages('device-chat');
+        expect(deviceMsgs.some(m => m.id.includes('core-welcome-image'))).toBe(true);
+        expect(deviceMsgs.some(m => m.id.includes('core-welcome') && !m.id.includes('image'))).toBe(true);
+        const welcome = deviceMsgs.find(m => m.id.includes('core-welcome') && m.type === 'text');
+        expect(welcome?.text).toContain('Get in contact!');
+        const image = deviceMsgs.find(m => m.type === 'image');
+        expect(image?.media?.data).toBe('/images/intro1.png');
+        // Self-talk / Saved messages
+        const self = await acc.getChat(acc.getCredentials().email.toLowerCase());
+        expect(self).not.toBeNull();
+        expect(self!.name).toBe('Saved messages');
+        // Idempotent
+        const nBefore = deviceMsgs.length;
+        await acc.updateDeviceChats();
+        expect((await acc.getChatMessages('device-chat')).length).toBe(nBefore);
     });
 
     it('config bag set/get', async () => {

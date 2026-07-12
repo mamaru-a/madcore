@@ -27,3 +27,6 @@ Thumbs.db
 package-lock.json
 yarn.lock
 pnpm-lock.yaml
+.madmail-docker/
+.venv-sj/
+.tools/

@@ -1,0 +1,17 @@
+# Never pack/install these into consumers (esp. Docker runtime state is root-owned → EACCES)
+.madmail-docker/
+.venv-sj/
+.tools/
+.git/
+.github/
+node_modules/
+test/
+docs/
+Makefile
+bun.lock
+*.log
+.env
+.env.*
+coverage/
+*.tsbuildinfo
+.DS_Store

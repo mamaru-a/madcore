@@ -7,6 +7,7 @@
  */
 
 import type { SDKContext } from './context.js';
+import { getKnownKey } from './crypto.js';
 
 const crypto = globalThis.crypto;
 
@@ -158,6 +159,7 @@ export function buildPgpMimeEnvelope(opts: PgpEnvelopeOptions): string {
         `Content-Type: application/octet-stream; name="encrypted.asc"`,
         `Content-Description: OpenPGP encrypted message`,
         `Content-Disposition: inline; filename="encrypted.asc"`,
+        `Content-Transfer-Encoding: 7bit`,
         '',
         opts.armored,
         '',
@@ -190,7 +192,7 @@ export async function sendEncryptedMime(
     ctx: SDKContext,
     opts: SendEncryptedOptions,
 ): Promise<string> {
-    const peerKey = ctx.knownKeys.get(opts.toEmail.toLowerCase());
+    const peerKey = getKnownKey(ctx.knownKeys, opts.toEmail);
     if (!peerKey || !ctx.privateKey || !ctx.publicKey) {
         throw new Error(`No key for ${opts.toEmail} — cannot send encrypted message`);
     }

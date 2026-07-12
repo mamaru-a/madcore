@@ -27,20 +27,34 @@
   "types": "./dist/sdk.d.ts",
   "exports": {
     ".": {
-      "types": "./dist/sdk.d.ts",
-      "import": "./dist/sdk.js"
+      "types": "./sdk.ts",
+      "import": "./sdk.ts",
+      "default": "./dist/sdk.js"
     },
     "./store": {
-      "types": "./dist/store.d.ts",
-      "import": "./dist/store.js"
+      "types": "./store.ts",
+      "import": "./store.ts",
+      "default": "./dist/store.js"
     },
     "./types": {
-      "types": "./dist/types.d.ts",
-      "import": "./dist/types.js"
+      "types": "./types.ts",
+      "import": "./types.ts",
+      "default": "./dist/types.js"
+    },
+    "./jsonrpc": {
+      "types": "./jsonrpc/index.ts",
+      "import": "./jsonrpc/index.ts",
+      "default": "./dist/jsonrpc/index.js"
     }
   },
   "files": [
     "dist",
+    "sdk.ts",
+    "store.ts",
+    "types.ts",
+    "account",
+    "lib",
+    "jsonrpc",
     "LICENSE",
     "README.md"
   ],
@@ -57,8 +71,9 @@
     "dev": "tsc --watch",
     "typecheck": "tsc --noEmit",
     "prepublishOnly": "bun run typecheck && bun run build",
-    "test": "bun test test/rpc/",
+    "test": "make test",
     "test:rpc": "bun test test/rpc/",
+    "test:init": "make test-init",
     "test:full": "bun run test/full.ts",
     "test:single": "bun run test/single.ts",
     "test:two-party": "bun run test/two-party.ts",
@@ -68,14 +83,19 @@
     "test:join-group": "bun run test/join-group.ts",
     "test:channel": "bun run test/interactive-channel.ts",
     "test:live": "bun run test/live-madmail.ts",
-    "test:live-full": "bun run test/live/run.ts"
+    "test:live-full": "bun run test/live/run.ts",
+    "test:sj-docker-up": "bash test/live/madmail-docker-up.sh",
+    "test:sj-docker": "NODE_TLS_REJECT_UNAUTHORIZED=0 bun test test/live/securejoin-docker.test.ts",
+    "test:sj-docker-all": "NODE_TLS_REJECT_UNAUTHORIZED=0 bun test test/live/securejoin-docker.test.ts"
   },
   "dependencies": {
-    "openpgp": "^6.0.1"
+    "openpgp": "^6.0.1",
+    "qrcode": "^1.5.4"
   },
   "devDependencies": {
     "@types/bun": "^1.3.14",
     "@types/node": "^25.5.0",
+    "@types/qrcode": "^1.5.6",
     "bun-types": "^1.3.14",
     "typescript": "^5.4.0"
   }

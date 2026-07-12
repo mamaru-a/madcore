@@ -23,9 +23,10 @@ bun run build
 
 | Import | Purpose |
 |--------|---------|
-| `madcore` | `DeltaChatSDK`, `DeltaChatAccount`, store helpers, types |
+| `madcore` | `DeltaChatSDK`, `DeltaChatAccount`, store helpers, types, JSON-RPC compat |
 | `madcore/store` | `MemoryStore`, `IndexedDBStore`, `createStore()` |
 | `madcore/types` | TypeScript type definitions |
+| `madcore/jsonrpc` | Core-compatible JSON-RPC facade (`DeltaChatJsonRpc`, `handleRpc`) |
 
 ---
 
@@ -88,6 +89,7 @@ const dc = DeltaChatSDK({ store: new MemoryStore() });
 | **[Security](./docs/security.md)** | PGP, Autocrypt, SecureJoin |
 | **[Architecture](./docs/architecture.md)** | Module layout, WebSocket protocol, storage internals |
 | **[Core parity](./docs/parity.md)** | madcore vs Delta Chat core RPC |
+| **[JSON-RPC compat](./docs/jsonrpc-compat.md)** | Full core wire API surface on madcore |
 
 ---
 
@@ -95,10 +97,31 @@ const dc = DeltaChatSDK({ store: new MemoryStore() });
 
 ```bash
 bun run dev            # tsc --watch
-bun run test           # offline unit tests (test/rpc)
 bun run build          # emit dist/
+bun run test:rpc       # offline unit tests only (test/rpc)
 bun run test:live-full # live E2E (needs SERVER_URL)
 ```
+
+### SecureJoin + official core (local madmail Docker)
+
+One command runs the full process:
+
+```bash
+make test
+# same as: bun run test
+```
+
+That does, in order:
+
+1. Download / link `deltachat-rpc-server` → `.tools/`
+2. Start madmail Docker (static IP `172.28.100.10`) and **enable webimap + websmtp**
+3. Build `dist/`
+4. Offline unit tests (`test/rpc/`)
+5. **core ↔ core** SecureJoin (JS stdio client + rpc-server)
+6. **madcore** SecureJoin + cross with core (JS SDK over webimap/websmtp)
+
+Pure **JS** core client: `test/live/core-rpc.ts` (no Python).  
+Details: [test/live/README.md](./test/live/README.md).
 
 ```bash
 SERVER_URL=https://relay.example

@@ -8,10 +8,19 @@ import * as groupLib from '../lib/group.js';
 import * as webxdcLib from '../lib/webxdc.js';
 import * as locationLib from '../lib/location.js';
 import * as callsLib from '../lib/calls.js';
+import { emailsEqual } from '../lib/crypto.js';
 import { viewtypeToStoreType } from '../lib/viewtype.js';
 import type { IncomingMessage, ParsedMessage } from '../types.js';
 import { log } from '../lib/logger.js';
+import { dumpSecureJoinMessage } from '../lib/securejoin.js';
 import { AccountProfile } from './profile.js';
+
+/** Legacy chat rows that look like SecureJoin control text (pre-fix store). */
+function isLegacySecureJoinBubble(m: StoredMessage): boolean {
+    if (m.type === 'securejoin') return true;
+    const t = (m.text || '').trim();
+    return /^secure-join:\s*v[cg]-/i.test(t);
+}
 
 export abstract class AccountInbox extends AccountProfile {
     /**
@@ -52,9 +61,43 @@ export abstract class AccountInbox extends AccountProfile {
                 return null;
             }
 
-            // Inviter-side SecureJoin auto-response
-            if (parsed.isSecureJoin && this.myInviteNumber) {
-                await this.handleIncomingSecureJoin(parsed);
+            // ── SecureJoin control plane (mirrors core receive_imf + HandshakeMessage) ──
+            // Handshake mails must NEVER become chat bubbles. Core returns Done/Ignore
+            // and does not file them for the user. We:
+            //  1) wake waiters (joiner waitForMessage)
+            //  2) auto-answer as inviter when we hold invite tokens
+            //  3) return without store / IncomingMsg
+            if (parsed.isSecureJoin) {
+                log.info(
+                    'sdk',
+                    `SecureJoin inbound step=${parsed.secureJoinStep || '?'} from=${parsed.from}`,
+                );
+                dumpSecureJoinMessage(
+                    'IN',
+                    {
+                        step: parsed.secureJoinStep,
+                        from: parsed.from,
+                        to: parsed.to,
+                        note: 'parsed inbound handshake',
+                    },
+                    raw.body || '',
+                    {
+                        uid: parsed.uid,
+                        inviteNumber: parsed.secureJoinInviteNumber,
+                        auth: parsed.secureJoinAuth,
+                        encrypted: parsed.encrypted,
+                        text: parsed.text,
+                        headers: parsed.headers,
+                        innerHeaders: parsed.innerHeaders,
+                    },
+                );
+                for (const h of this.messageHandlers) h(parsed);
+                try {
+                    await this.handleIncomingSecureJoin(parsed);
+                } catch (e: any) {
+                    log.warn('sdk', `SecureJoin handle failed: ${e?.message || e}`);
+                }
+                return parsed;
             }
 
             // Call signaling (before generic store)
@@ -144,11 +187,9 @@ export abstract class AccountInbox extends AccountProfile {
                 return parsed;
             }
 
-            // Emit DC_EVENT_* events
+            // Emit DC_EVENT_* events (SecureJoin already returned above)
             if (parsed.isReadReceipt) {
                 // Handled in storeIncomingMessage → DC_EVENT_MSG_READ
-            } else if (parsed.isSecureJoin) {
-                this.emit('DC_EVENT_SECUREJOIN_JOINER_PROGRESS', { event: 'DC_EVENT_SECUREJOIN_JOINER_PROGRESS', msg: parsed, data1: parsed.secureJoinStep });
             } else if (parsed.isReaction) {
                 this.emit('DC_EVENT_INCOMING_REACTION', { event: 'DC_EVENT_INCOMING_REACTION', msg: parsed, msgId: parsed.rfc724mid || undefined });
             } else if (parsed.isDelete) {
@@ -177,7 +218,11 @@ export abstract class AccountInbox extends AccountProfile {
     async getChatList(): Promise<StoredChat[]> { return this.store.getAllChats(); }
     async searchChats(query: string): Promise<StoredChat[]> { return this.store.searchChats(query); }
     async getChat(chatId: string): Promise<StoredChat | null> { return this.store.getChat(chatId); }
-    async getChatMessages(chatId: string, limit = 100, offset = 0): Promise<StoredMessage[]> { return this.store.getChatMessages(chatId, limit, offset); }
+    async getChatMessages(chatId: string, limit = 100, offset = 0): Promise<StoredMessage[]> {
+        const msgs = await this.store.getChatMessages(chatId, limit, offset);
+        // Hide any legacy handshake rows that were stored before SJ control-plane fix
+        return msgs.filter(m => !isLegacySecureJoinBubble(m));
+    }
 
     async deleteChat(chatId: string): Promise<void> {
         await this.store.deleteChat(chatId);
@@ -191,9 +236,18 @@ export abstract class AccountInbox extends AccountProfile {
         if (msg) {
             const chat = await this.store.getChat(msg.chatId);
             if (chat && chat.lastMessageId === msgId) {
-                const msgs = await this.store.getChatMessages(msg.chatId, 1, 0);
-                if (msgs.length > 0) { chat.lastMessage = msgs[0].text; chat.lastMessageId = msgs[0].id; chat.lastMessageTime = msgs[0].timestamp; }
-                else { chat.lastMessage = undefined; chat.lastMessageId = undefined; chat.lastMessageTime = undefined; }
+                // oldest→newest; last element is the new preview
+                const msgs = await this.store.getChatMessages(msg.chatId, 500, 0);
+                if (msgs.length > 0) {
+                    const last = msgs[msgs.length - 1];
+                    chat.lastMessage = (last.text || '').substring(0, 100);
+                    chat.lastMessageId = last.id;
+                    chat.lastMessageTime = last.timestamp > 1e12 ? last.timestamp : last.timestamp * 1000;
+                } else {
+                    chat.lastMessage = undefined;
+                    chat.lastMessageId = undefined;
+                    chat.lastMessageTime = undefined;
+                }
                 await this.store.saveChat(chat);
             }
         }
@@ -375,9 +429,19 @@ export abstract class AccountInbox extends AccountProfile {
         const peerEmail = parsed.from.toLowerCase();
         const chat = await this.getOrCreateChat(peerEmail);
 
-        // Read receipts: update original message, do not create a chat bubble
-        if (parsed.isReadReceipt && parsed.readReceiptFor) {
-            await this.applyReadReceipt(parsed.readReceiptFor, parsed.from, parsed.timestamp);
+        // Read receipts: update original message, never create a chat bubble
+        if (parsed.isReadReceipt) {
+            if (parsed.readReceiptFor) {
+                await this.applyReadReceipt(parsed.readReceiptFor, parsed.from, parsed.timestamp);
+            } else {
+                log.debug('sdk', 'MDN without Original-Message-ID — dropped (no bubble)');
+            }
+            return;
+        }
+
+        // SecureJoin handshake control traffic — no chat bubbles (inviter/joiner
+        // already handled protocol in processIncomingRaw).
+        if (parsed.isSecureJoin) {
             return;
         }
 
@@ -423,9 +487,18 @@ export abstract class AccountInbox extends AccountProfile {
 
         if (parsed.isDelete) {
             await this.store.deleteMessage(parsed.text);
-            const msgs = await this.store.getChatMessages(peerEmail, 1, 0);
-            if (msgs.length > 0) { const l = msgs[msgs.length - 1]; chat.lastMessage = l.text; chat.lastMessageId = l.id; chat.lastMessageTime = l.timestamp; }
-            else { chat.lastMessage = undefined; chat.lastMessageId = undefined; chat.lastMessageTime = undefined; }
+            // oldest→newest; last element is the new preview (limit=1 would return the oldest)
+            const msgs = await this.store.getChatMessages(peerEmail, 500, 0);
+            if (msgs.length > 0) {
+                const l = msgs[msgs.length - 1];
+                chat.lastMessage = (l.text || '').substring(0, 100);
+                chat.lastMessageId = l.id;
+                chat.lastMessageTime = l.timestamp > 1e12 ? l.timestamp : l.timestamp * 1000;
+            } else {
+                chat.lastMessage = undefined;
+                chat.lastMessageId = undefined;
+                chat.lastMessageTime = undefined;
+            }
             await this.store.saveChat(chat);
             return;
         }
@@ -458,13 +531,16 @@ export abstract class AccountInbox extends AccountProfile {
             return;
         }
 
-        const isSelf = parsed.from === this.credentials.email.toLowerCase();
+        const isSelf = emailsEqual(parsed.from, this.credentials.email);
         let targetChatId: string;
         if (parsed.groupId) {
             targetChatId = parsed.groupId;
         } else {
             // For 1:1, if it's from us, it's addressed TO the peer (targetChatId is peerEmail)
-            targetChatId = isSelf ? parsed.to.toLowerCase() : parsed.from.toLowerCase();
+            // Prefer the peer address we already opened a chat for (preserves bracket form).
+            targetChatId = isSelf
+                ? (parsed.to || '').toLowerCase()
+                : peerEmail;
         }
 
         // Map parse viewtype → store type
@@ -517,9 +593,10 @@ export abstract class AccountInbox extends AccountProfile {
         // Update chat summary
         const chatObj = await this.store.getChat(targetChatId);
         if (chatObj) {
-            chatObj.lastMessage = parsed.text.substring(0, 100);
+            chatObj.lastMessage = (parsed.text || '').substring(0, 100);
             chatObj.lastMessageId = msg.id;
-            chatObj.lastMessageTime = msg.timestamp;
+            // Always store ms so chatlist sort matches desktop (newest first)
+            chatObj.lastMessageTime = msg.timestamp > 1e12 ? msg.timestamp : msg.timestamp * 1000;
             if (!isSelf) {
                 chatObj.unreadCount++;
             }
@@ -545,9 +622,9 @@ export abstract class AccountInbox extends AccountProfile {
                 msg.state = 'seen';
                 msg.seenAt = now;
                 await this.store.saveMessage(msg);
-                // Send MDN to the sender (best-effort; ignore crypto errors)
+                // Send MDN to the sender (core-compatible multipart/report)
                 try {
-                    if (msg.from && this.knownKeys.has(msg.from.toLowerCase())) {
+                    if (msg.from) {
                         await messagingLib.sendReadReceipt(this.ctx(), msg.from, msg.id);
                     }
                 } catch (e: any) {
@@ -577,7 +654,7 @@ export abstract class AccountInbox extends AccountProfile {
         // Wire read receipt when we first mark an incoming message as seen
         if (wasUnseen && msg.direction === 'incoming' && !byEmail) {
             try {
-                if (msg.from && this.knownKeys.has(msg.from.toLowerCase())) {
+                if (msg.from) {
                     await messagingLib.sendReadReceipt(this.ctx(), msg.from, msg.id);
                 }
             } catch (e: any) {
@@ -591,18 +668,25 @@ export abstract class AccountInbox extends AccountProfile {
 
     /** Apply an inbound read receipt to a stored outgoing message */
     protected async applyReadReceipt(originalMsgId: string, readerEmail: string, at: number): Promise<void> {
-        const msg = await this.store.getMessage(originalMsgId);
+        const candidates = [
+            originalMsgId,
+            originalMsgId.startsWith('<') ? originalMsgId.slice(1, -1) : `<${originalMsgId}>`,
+            originalMsgId.replace(/^<|>$/g, ''),
+            `<${originalMsgId.replace(/^<|>$/g, '')}>`,
+        ];
+        let msg: StoredMessage | null = null;
+        for (const id of candidates) {
+            if (!id) continue;
+            msg = (await this.store.getMessage(id)) || null;
+            if (msg) break;
+        }
         if (!msg) {
-            // Message-IDs sometimes arrive with/without angle brackets
-            const alt = originalMsgId.startsWith('<')
-                ? originalMsgId.slice(1, -1)
-                : `<${originalMsgId}>`;
-            const msg2 = await this.store.getMessage(alt);
-            if (!msg2) {
-                log.debug('sdk', `Read receipt for unknown message ${originalMsgId}`);
-                return;
-            }
-            return this.applyReadReceipt(msg2.id, readerEmail, at);
+            log.debug('sdk', `Read receipt for unknown message ${originalMsgId}`);
+            return;
+        }
+        if (msg.direction !== 'outgoing') {
+            log.debug('sdk', `Ignoring MDN for non-outgoing message ${msg.id}`);
+            return;
         }
 
         msg.state = 'seen';

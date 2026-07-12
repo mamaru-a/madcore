@@ -193,6 +193,12 @@ export interface IDeltaChatStore {
 
     // Bulk
     clear(): Promise<void>;
+
+    /**
+     * Permanently remove all persisted data for one account on this device
+     * (IndexedDB `madcore-{email}` + registry row, or in-memory maps).
+     */
+    wipeAccount?(email: string): Promise<void>;
 }
 
 // ─── In-Memory Store (Node.js / fallback) ───────────────────────────────────────
@@ -227,18 +233,22 @@ export class MemoryStore implements IDeltaChatStore {
 
     async getChat(chatId: string) { return this.chats.get(chatId) || null; }
     async getAllChats() {
-        return [...this.chats.values()].sort((a, b) =>
-            (b.lastMessageTime || 0) - (a.lastMessageTime || 0)
-        );
+        const toMs = (t?: number) =>
+            !t ? 0 : t > 1e12 ? t : t * 1000;
+        return [...this.chats.values()].sort((a, b) => {
+            if (a.pinned !== b.pinned) return a.pinned ? -1 : 1;
+            return toMs(b.lastMessageTime) - toMs(a.lastMessageTime);
+        });
     }
     async saveChat(chat: StoredChat) { this.chats.set(chat.id, chat); }
     async deleteChat(chatId: string) { this.chats.delete(chatId); }
 
     async getMessage(msgId: string) { return this.messages.get(msgId) || null; }
     async getChatMessages(chatId: string, limit = 100, offset = 0) {
+        const toMs = (t: number) => (t > 1e12 ? t : t * 1000);
         return [...this.messages.values()]
             .filter(m => m.chatId === chatId)
-            .sort((a, b) => a.timestamp - b.timestamp)
+            .sort((a, b) => toMs(a.timestamp) - toMs(b.timestamp))
             .slice(offset, offset + limit);
     }
     async saveMessage(msg: StoredMessage) { this.messages.set(msg.id, msg); }
@@ -277,6 +287,31 @@ export class MemoryStore implements IDeltaChatStore {
         this.chats.clear();
         this.messages.clear();
         this.contacts.clear();
+    }
+
+    async wipeAccount(email: string) {
+        const key = email.toLowerCase();
+        this.accounts.delete(key);
+        // Drop chats tied to this peer / id (shared memory store — best effort)
+        for (const [id, chat] of [...this.chats.entries()]) {
+            if (
+                chat.id === key ||
+                chat.peerEmail?.toLowerCase() === key ||
+                (chat.lastMessageId && chat.lastMessageId.includes(key))
+            ) {
+                this.chats.delete(id);
+            }
+        }
+        for (const [id, msg] of [...this.messages.entries()]) {
+            if (
+                msg.chatId?.toLowerCase() === key ||
+                msg.from?.toLowerCase() === key ||
+                msg.to?.toLowerCase() === key
+            ) {
+                this.messages.delete(id);
+            }
+        }
+        this.contacts.delete(key);
     }
 }
 
@@ -372,7 +407,7 @@ export class IndexedDBStore implements IDeltaChatStore {
         });
     }
 
-    /** Remove an email from the multi-account index (does not delete the account DB). */
+    /** Remove an email from the multi-account index only. */
     async forgetAccount(email: string): Promise<void> {
         if (typeof indexedDB === 'undefined') return;
         const db = await this.getRegistryDB();
@@ -382,6 +417,39 @@ export class IndexedDBStore implements IDeltaChatStore {
             tx.oncomplete = () => resolve();
             tx.onerror = () => reject(tx.error);
         });
+    }
+
+    /**
+     * Delete the per-account IndexedDB (`{baseName}-{email}`) and registry entry.
+     * Call after disconnecting so no open WebSocket / writer holds the DB.
+     */
+    async wipeAccount(email: string): Promise<void> {
+        const key = email.toLowerCase();
+        const accountDbName = `${this.baseName}-${key}`;
+
+        // Close open handle if it points at this account DB
+        if (this.db && this.dbName === accountDbName) {
+            try {
+                this.db.close();
+            } catch {
+                /* ignore */
+            }
+            this.db = null;
+        }
+
+        if (typeof indexedDB !== 'undefined') {
+            await new Promise<void>((resolve, reject) => {
+                const req = indexedDB.deleteDatabase(accountDbName);
+                req.onsuccess = () => resolve();
+                req.onerror = () => reject(req.error || new Error('deleteDatabase failed'));
+                // Other tabs may block; still proceed after a short wait
+                req.onblocked = () => {
+                    setTimeout(() => resolve(), 750);
+                };
+            });
+        }
+
+        await this.forgetAccount(key);
     }
 
     private async getDB(): Promise<IDBDatabase> {
@@ -458,7 +526,12 @@ export class IndexedDBStore implements IDeltaChatStore {
     }
     async getAllChats() {
         const all = await this.tx<StoredChat[]>('chats', 'readonly', s => s.getAll());
-        return all.sort((a, b) => (b.lastMessageTime || 0) - (a.lastMessageTime || 0));
+        const toMs = (t?: number) =>
+            !t ? 0 : t > 1e12 ? t : t * 1000;
+        return all.sort((a, b) => {
+            if (a.pinned !== b.pinned) return a.pinned ? -1 : 1;
+            return toMs(b.lastMessageTime) - toMs(a.lastMessageTime);
+        });
     }
     async saveChat(chat: StoredChat) {
         await this.tx('chats', 'readwrite', s => s.put(chat));
@@ -479,8 +552,9 @@ export class IndexedDBStore implements IDeltaChatStore {
             const index = store.index('chatId');
             const request = index.getAll(chatId);
             request.onsuccess = () => {
+                const toMs = (t: number) => (t > 1e12 ? t : t * 1000);
                 const msgs = (request.result as StoredMessage[])
-                    .sort((a, b) => a.timestamp - b.timestamp)
+                    .sort((a, b) => toMs(a.timestamp) - toMs(b.timestamp))
                     .slice(offset, offset + limit);
                 resolve(msgs);
             };
@@ -546,11 +620,18 @@ export class IndexedDBStore implements IDeltaChatStore {
 
     async clear() {
         const db = await this.getDB();
-        const tx = db.transaction(['account', 'chats', 'messages', 'contacts'], 'readwrite');
-        tx.objectStore('account').clear();
-        tx.objectStore('chats').clear();
-        tx.objectStore('messages').clear();
-        tx.objectStore('contacts').clear();
+        return new Promise<void>((resolve, reject) => {
+            const tx = db.transaction(
+                ['account', 'chats', 'messages', 'contacts'],
+                'readwrite',
+            );
+            tx.objectStore('account').clear();
+            tx.objectStore('chats').clear();
+            tx.objectStore('messages').clear();
+            tx.objectStore('contacts').clear();
+            tx.oncomplete = () => resolve();
+            tx.onerror = () => reject(tx.error);
+        });
     }
 }
 

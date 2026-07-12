@@ -12,6 +12,30 @@ import type { Connectivity } from '../types.js';
 import { log } from '../lib/logger.js';
 import { AccountInbox } from './inbox.js';
 
+/**
+ * Stock welcome text — `StockMessage::WelcomeMessage` fallback in core `stock_str.rs`.
+ * Core inserts this once as labelled device msg `core-welcome`.
+ */
+export const CORE_WELCOME_MESSAGE =
+    'Get in contact!\n\n' +
+    '🙌 Tap "QR code" on the main screen of both devices. ' +
+    'Choose "Scan QR Code" on one device, and point it at the other\n\n' +
+    '🌍 If not in the same room, ' +
+    'scan via video call or share an invite link from "Scan QR code"\n\n' +
+    'Then: Enjoy your decentralized messenger experience. ' +
+    'In contrast to other popular apps, ' +
+    'without central control or tracking or selling you, ' +
+    'friends, colleagues or family out to large organizations.';
+
+/** Host-served welcome image (madweb static/); mirrors core welcome-image.jpg in the device chat. */
+export const CORE_WELCOME_IMAGE_PATH = '/images/intro1.png';
+
+export type DeviceMessageContent = {
+    text?: string | null;
+    type?: StoredMessage['type'];
+    media?: StoredMessage['media'];
+};
+
 export abstract class AccountFeatures extends AccountInbox {
     // WEBXDC
     // ═══════════════════════════════════════════════════════════════════════
@@ -332,9 +356,86 @@ export abstract class AccountFeatures extends AccountInbox {
     }
 
     /**
-     * Local-only device message (system chat). Not sent over the network.
+     * Local-only device message (device chat). Not sent over the network.
+     *
+     * Mirrors core `add_device_msg`:
+     * - Each `label` is recorded once; later calls with the same label are no-ops.
+     * - `text === null` / empty **without media** only registers the label (skip future content).
+     * - Messages are normal chat bubbles (text/image), **not** info/system events.
      */
-    async addDeviceMessage(label: string, text: string): Promise<{ msgId: string; message: StoredMessage }> {
+    async addDeviceMessage(
+        label: string,
+        content: string | null | DeviceMessageContent,
+    ): Promise<{ msgId: string; message: StoredMessage } | null> {
+        const trimmedLabel = (label || '').trim() || 'device';
+        const labelsKey = 'device_msg_labels';
+        const rawLabels = this.configBag.get(labelsKey) || '';
+        const labels = new Set(
+            rawLabels.split('\n').map(s => s.trim()).filter(Boolean),
+        );
+        const msgId = `<device-${trimmedLabel}@local>`;
+
+        const rememberLabel = async () => {
+            if (labels.has(trimmedLabel)) return;
+            labels.add(trimmedLabel);
+            this.configBag.set(labelsKey, [...labels].join('\n'));
+            // Persist immediately so a quick account-switch cannot lose the label.
+            await this.flushPersist();
+        };
+
+        // Already recorded → never insert again (core add_device_msg semantics).
+        if (labels.has(trimmedLabel)) {
+            return null;
+        }
+
+        // Already in store (stable id, or legacy Date.now ids) → mark label, no new bubble.
+        const existing = await this.store.getMessage(msgId);
+        if (existing) {
+            await rememberLabel();
+            return null;
+        }
+        try {
+            const deviceMsgs = await this.store.getChatMessages('device-chat', 500, 0);
+            // Exact stable id, or legacy ids that encode this label only
+            // (must not treat `core-welcome-image` as a hit for label `core-welcome`)
+            const legacy = deviceMsgs.find(m => {
+                if (m.id === msgId) return true;
+                // Legacy: <device-{label}-{timestamp}@local> or device-{label}-{ts}
+                const exactLegacy =
+                    m.id.startsWith(`<device-${trimmedLabel}-`) ||
+                    m.id.startsWith(`device-${trimmedLabel}-`);
+                if (!exactLegacy) return false;
+                // Reject longer labels that only share a prefix (e.g. core-welcome vs core-welcome-image)
+                const rest = m.id.startsWith('<')
+                    ? m.id.slice(`<device-${trimmedLabel}-`.length)
+                    : m.id.slice(`device-${trimmedLabel}-`.length);
+                // After the label must come a digit (timestamp) or '@' / end — not more label text
+                return /^[\d@]/.test(rest) || rest === '' || rest.startsWith('@');
+            });
+            if (legacy) {
+                await rememberLabel();
+                return null;
+            }
+        } catch {
+            /* no device chat yet */
+        }
+
+        await rememberLabel();
+
+        const opts: DeviceMessageContent =
+            content == null
+                ? { text: null }
+                : typeof content === 'string'
+                  ? { text: content, type: 'text' }
+                  : content;
+
+        const hasMedia = !!(opts.media?.data || opts.media?.filename);
+        const text = opts.text == null ? '' : String(opts.text);
+        // Label-only registration (core: msg=null) — no bubble.
+        if (!hasMedia && (opts.text == null || text === '')) {
+            return null;
+        }
+
         const chatId = 'device-chat';
         let chat = await this.store.getChat(chatId);
         if (!chat) {
@@ -350,29 +451,80 @@ export abstract class AccountFeatures extends AccountInbox {
             };
             await this.store.saveChat(chat);
         }
-        const msgId = `<device-${label}-${Date.now()}@local>`;
         const now = Date.now();
+        // Keep sort order stable if several device msgs are inserted in the same ms
+        const lastTs = chat.lastMessageTime || 0;
+        const timestamp = now <= lastTs ? lastTs + 1 : now;
+        const type: StoredMessage['type'] = opts.type || (hasMedia ? 'image' : 'text');
         const message: StoredMessage = {
             id: msgId,
             chatId,
             from: 'device',
             to: this.credentials.email,
             text,
-            timestamp: now,
+            timestamp,
             encrypted: false,
             direction: 'incoming',
-            type: 'system',
-            state: 'seen',
-            sentAt: now,
-            seenAt: now,
+            // Normal message — UI treats `system` as centered info/event bubbles.
+            type,
+            // Core uses InFresh for new device msgs
+            state: 'sent',
+            sentAt: timestamp,
+            media: opts.media,
         };
         await this.store.saveMessage(message);
-        chat.lastMessage = text.substring(0, 100);
+        const preview =
+            text.trim() ||
+            (type === 'image' ? '🖼' : opts.media?.filename || 'Device message');
+        chat.lastMessage = preview.substring(0, 100);
         chat.lastMessageId = msgId;
-        chat.lastMessageTime = now;
+        chat.lastMessageTime = timestamp > 1e12 ? timestamp : timestamp * 1000;
+        chat.unreadCount = (chat.unreadCount || 0) + 1;
         await this.store.saveChat(chat);
         this.emit('DC_EVENT_INCOMING_MSG', { event: 'DC_EVENT_INCOMING_MSG', chatId, msgId, message });
+        this.emit('DC_EVENT_MSGS_CHANGED', { event: 'DC_EVENT_MSGS_CHANGED', chatId, msgId, message });
         return { msgId, message };
+    }
+
+    /**
+     * Mirrors core `Context::update_device_chats` (called after successful configure):
+     * 1. Create Saved messages (self-talk) once
+     * 2. `core-welcome-image` device image
+     * 3. `core-welcome` stock welcome text
+     *
+     * Labels make this idempotent — safe on every configure / restore.
+     */
+    async updateDeviceChats(): Promise<void> {
+        try {
+            // 1) Saved messages chat (self-talk) — once, like core `self-chat-added`
+            if (this.configBag.get('self-chat-added') !== '1') {
+                this.configBag.set('self-chat-added', '1');
+                const selfEmail = this.credentials.email.toLowerCase();
+                const selfChat = await this.getOrCreateChat(selfEmail);
+                if (selfChat.name === selfEmail.split('@')[0] || !selfChat.name) {
+                    selfChat.name = 'Saved messages';
+                    await this.store.saveChat(selfChat);
+                }
+                await this.flushPersist();
+            }
+
+            // 2) Welcome image (core label `core-welcome-image`)
+            // Path is served from madweb `static/images/intro1.png` (same as mock runtime).
+            await this.addDeviceMessage('core-welcome-image', {
+                text: '',
+                type: 'image',
+                media: {
+                    filename: 'welcome-image.jpg',
+                    mimeType: 'image/png',
+                    data: CORE_WELCOME_IMAGE_PATH,
+                },
+            });
+
+            // 3) Welcome text (core label `core-welcome` / StockMessage::WelcomeMessage)
+            await this.addDeviceMessage('core-welcome', CORE_WELCOME_MESSAGE);
+        } catch (e: any) {
+            log.warn('sdk', `updateDeviceChats: ${e?.message || e}`);
+        }
     }
 
     /**

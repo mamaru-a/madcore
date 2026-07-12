@@ -184,6 +184,113 @@ export interface ParseContext {
     peerAvatars: Map<string, string>;
 }
 
+/** Import every `Autocrypt:` header from a raw MIME source (outer or decrypted). */
+function importAllAutocryptHeaders(
+    source: string,
+    from: string,
+    ctx: ParseContext,
+): void {
+    // Unfold continuations then find each Autocrypt header line
+    const unfolded = source.replace(/\r?\n[ \t]+/g, ' ');
+    const re = /^Autocrypt:\s*(.+)$/gim;
+    let m: RegExpExecArray | null;
+    while ((m = re.exec(unfolded)) !== null) {
+        const parsed = cryptoLib.parseAutocryptHeader(m[1]);
+        if (!parsed) continue;
+        // Always refresh — first-write-wins left stale keys after re-key / rejoin
+        cryptoLib.setKnownKey(ctx.knownKeys, parsed.addr, parsed.armoredKey);
+        if (from) cryptoLib.setKnownKey(ctx.knownKeys, from, parsed.armoredKey);
+        log.debug('mime', `Autocrypt imported for ${parsed.addr}`);
+    }
+}
+
+/**
+ * Detect read receipts / MDNs (Delta Chat core + madcore dual format).
+ *
+ * Core sends RFC 6522:
+ *   Content-Type: multipart/report; report-type=disposition-notification
+ *   + message/disposition-notification with Original-Message-ID + Disposition: …; displayed
+ *
+ * Madcore also emits Chat-Disposition: display + Original-Message-ID (outer and protected).
+ */
+export function detectReadReceipt(opts: {
+    headers: Record<string, string>;
+    innerHeaders: Record<string, string>;
+    outerSource: string;
+    innerSource?: string;
+    text?: string;
+}): { isReadReceipt: boolean; readReceiptFor: string } {
+    const { headers, innerHeaders, outerSource, innerSource = '', text = '' } = opts;
+    const sources = [outerSource, innerSource].filter(Boolean);
+
+    const pickOriginalId = (): string => {
+        for (const h of [innerHeaders, headers]) {
+            const v =
+                h['original-message-id'] ||
+                h['original-message-id'.toLowerCase()] ||
+                '';
+            if (v) return v.trim();
+        }
+        for (const src of sources) {
+            const m = src.match(/Original-Message-ID:\s*(<[^>\r\n]+>|[^\s;,\r\n]+)/i);
+            if (m) return m[1].trim();
+        }
+        // In-Reply-To as last resort (Exchange / some clients)
+        const irt = innerHeaders['in-reply-to'] || headers['in-reply-to'] || '';
+        if (irt) {
+            const m = irt.match(/<[^>]+>/);
+            if (m) return m[0];
+            return irt.trim();
+        }
+        return '';
+    };
+
+    // 1) Chat-Disposition: display (madcore dual / older wire)
+    const chatDisp = (
+        innerHeaders['chat-disposition'] ||
+        headers['chat-disposition'] ||
+        ''
+    ).toLowerCase();
+    if (chatDisp === 'display') {
+        const id = pickOriginalId();
+        if (id) return { isReadReceipt: true, readReceiptFor: id };
+    }
+
+    // 2) RFC 6522 multipart/report
+    const outerCt = (headers['content-type'] || '').toLowerCase();
+    const innerCt = (innerHeaders['content-type'] || '').toLowerCase();
+    const looksLikeReport =
+        (outerCt.includes('multipart/report') && outerCt.includes('disposition-notification')) ||
+        (innerCt.includes('multipart/report') && innerCt.includes('disposition-notification')) ||
+        sources.some(
+            s =>
+                /multipart\/report/i.test(s) &&
+                /report-type\s*=\s*disposition-notification/i.test(s),
+        );
+
+    const hasDispNotifPart = sources.some(
+        s =>
+            /Content-Type:\s*message\/disposition-notification/i.test(s) &&
+            /Disposition:\s*[^\r\n]*displayed/i.test(s),
+    );
+
+    // Human part alone must not become a chat bubble
+    const receiptText =
+        /^this is a receipt notification\.?$/i.test(text.trim()) ||
+        sources.some(s => /This is a receipt notification/i.test(s));
+
+    if (looksLikeReport || hasDispNotifPart || (receiptText && /Original-Message-ID:/i.test(outerSource + innerSource))) {
+        const id = pickOriginalId();
+        if (id) return { isReadReceipt: true, readReceiptFor: id };
+        // Report without id is still not a chat bubble — drop as control
+        if (looksLikeReport || hasDispNotifPart) {
+            return { isReadReceipt: true, readReceiptFor: '' };
+        }
+    }
+
+    return { isReadReceipt: false, readReceiptFor: '' };
+}
+
 /** Parse an incoming raw message → decrypted ParsedMessage */
 export async function parseIncoming(raw: IncomingMessage, ctx: ParseContext): Promise<ParsedMessage | null> {
     const body = raw.body || '';
@@ -199,22 +306,29 @@ export async function parseIncoming(raw: IncomingMessage, ctx: ParseContext): Pr
         if (!isNaN(parsedDate)) timestamp = parsedDate;
     }
 
-    // Skip our own messages
-    if (from === ctx.email.toLowerCase()) return null;
+    // Skip our own messages (bracketed vs bare IP must match)
+    if (cryptoLib.emailsEqual(from, ctx.email)) return null;
 
-    // Import Autocrypt key if present
-    const autocrypt = headers['autocrypt'];
-    if (autocrypt) {
-        const parsed = cryptoLib.parseAutocryptHeader(autocrypt);
-        if (parsed && !ctx.knownKeys.has(parsed.addr)) {
-            ctx.knownKeys.set(parsed.addr, parsed.armoredKey);
-            log.debug('mime', `Auto-imported key for ${parsed.addr}`);
+    // Import every Autocrypt header in the raw message (parseHeaders only keeps the last)
+    importAllAutocryptHeaders(body, from, ctx);
+
+    // SecureJoin detection (aligned with core securejoin.rs get_secure_join_step):
+    // 1) Secure-Join-Invitenumber alone → vc-request / vg-request
+    // 2) Secure-Join: v[cg]-* step header (outer or later inner)
+    // 3) Body fallback "Secure-Join: vc-request" (legacy plain-text body)
+    let sjHeader = (headers['secure-join'] || '').trim();
+    let sjInviteNumber = (headers['secure-join-invitenumber'] || '').trim();
+    let isSecureJoin = false;
+    if (sjInviteNumber) {
+        // Core: invitenumber presence is enough to classify as Request
+        isSecureJoin = true;
+        if (!sjHeader || !/^v[cg]-/i.test(sjHeader)) {
+            const grp = headers['secure-join-group'] || headers['chat-group-id'] || '';
+            sjHeader = grp ? 'vg-request' : 'vc-request';
         }
+    } else if (/^v[cg]-/i.test(sjHeader)) {
+        isSecureJoin = true;
     }
-
-    // Check for SecureJoin in outer headers
-    let sjHeader = headers['secure-join'] || '';
-    let isSecureJoin = /^v[cg]-/i.test(sjHeader.trim());
 
     // Try to decrypt
     let text = '';
@@ -226,6 +340,8 @@ export async function parseIncoming(raw: IncomingMessage, ctx: ParseContext): Pr
     let voiceDurationMs: number | undefined;
     let avatarData: string | null | undefined = undefined;
     let attachments: Attachment[] = [];
+    /** Decrypted inner MIME (or empty if cleartext) — used for MDN / report parsing */
+    let decryptedSource = '';
 
     // Check outer headers for voice
     if (headers['chat-voice-message'] === '1') isVoiceMessage = true;
@@ -241,40 +357,42 @@ export async function parseIncoming(raw: IncomingMessage, ctx: ParseContext): Pr
     const rawBody = headerEnd >= 0 ? body.substring(headerEnd + sepLen) : body;
 
     if (rawBody.includes('-----BEGIN PGP MESSAGE-----') && ctx.privateKey) {
-        const pgpStart = rawBody.indexOf('-----BEGIN PGP MESSAGE-----');
-        const pgpData = rawBody.substring(pgpStart);
+        const pgpData = cryptoLib.extractArmoredPgpMessage(rawBody) || rawBody;
         try {
             const decryptedStr = await cryptoLib.decrypt(pgpData, ctx.privateKey);
             encrypted = true;
+            decryptedSource = decryptedStr;
             innerHeaders = parseHeaders(decryptedStr);
 
             // Check inner headers for voice
             if (innerHeaders['chat-voice-message'] === '1') isVoiceMessage = true;
             if (innerHeaders['chat-duration']) voiceDurationMs = parseInt(innerHeaders['chat-duration'], 10);
 
-            // Import Autocrypt from inner headers
-            const innerAutocrypt = innerHeaders['autocrypt'];
-            if (innerAutocrypt) {
-                const parsed = cryptoLib.parseAutocryptHeader(innerAutocrypt);
-                if (parsed && !ctx.knownKeys.has(parsed.addr)) {
-                    ctx.knownKeys.set(parsed.addr, parsed.armoredKey);
-                    log.debug('mime', `Imported key for ${parsed.addr} from encrypted headers`);
-                }
-            }
-
-            // Import autocrypt-gossip
+            // Import Autocrypt / Gossip from decrypted protected headers (always refresh)
+            importAllAutocryptHeaders(decryptedStr, from, ctx);
             const gossipHeader = innerHeaders['autocrypt-gossip'];
             if (gossipHeader) {
                 const parsed = cryptoLib.parseAutocryptHeader(gossipHeader);
-                if (parsed && !ctx.knownKeys.has(parsed.addr)) {
-                    ctx.knownKeys.set(parsed.addr, parsed.armoredKey);
+                if (parsed) {
+                    cryptoLib.setKnownKey(ctx.knownKeys, parsed.addr, parsed.armoredKey);
+                    if (from) cryptoLib.setKnownKey(ctx.knownKeys, from, parsed.armoredKey);
                     log.debug('mime', `Imported gossip key for ${parsed.addr}`);
                 }
             }
 
-            // Check for SecureJoin in inner headers
-            const innerSJ = innerHeaders['secure-join'] || '';
-            if (!isSecureJoin && /^v[cg]-/i.test(innerSJ.trim())) {
+            // Check for SecureJoin in inner (protected) headers — preferred by core
+            const innerSJ = (innerHeaders['secure-join'] || '').trim();
+            const innerInvite = (innerHeaders['secure-join-invitenumber'] || '').trim();
+            if (innerInvite) {
+                isSecureJoin = true;
+                sjInviteNumber = innerInvite;
+                if (!innerSJ || !/^v[cg]-/i.test(innerSJ)) {
+                    const grp = innerHeaders['secure-join-group'] || innerHeaders['chat-group-id'] || '';
+                    sjHeader = grp ? 'vg-request' : 'vc-request';
+                } else {
+                    sjHeader = innerSJ;
+                }
+            } else if (/^v[cg]-/i.test(innerSJ)) {
                 isSecureJoin = true;
                 sjHeader = innerSJ;
             }
@@ -312,7 +430,13 @@ export async function parseIncoming(raw: IncomingMessage, ctx: ParseContext): Pr
                 }
             }
         } catch (e: any) {
-            text = `[Decryption failed: ${e.message}]`;
+            // Keep a visible but non-empty error so the UI does not render blank bubbles.
+            // Do not invent Secure-Join / MDN state from undecryptable ciphertext.
+            encrypted = true;
+            text = '';
+            log.warn('mime', `Decrypt failed from ${from}: ${e?.message || e}`);
+            // Surface in message list as a short placeholder
+            text = '⚠️ Cannot decrypt this message';
         }
     } else {
         // Prefer full-message extract; fall back to raw body for JSON control payloads
@@ -331,6 +455,29 @@ export async function parseIncoming(raw: IncomingMessage, ctx: ParseContext): Pr
         if (headers['chat-delete']) {
             isDelete = true;
             text = headers['chat-delete'];
+        }
+    }
+
+    // Body-text fallback: cores sometimes put "Secure-Join: vc-request" as the
+    // only visible body line. Treat as control traffic, not a chat bubble.
+    if (!isSecureJoin) {
+        const bodySj = (text || '').match(/^\s*secure-join:\s*([vV][cCgG]-[\w-]+)/im);
+        if (bodySj) {
+            isSecureJoin = true;
+            sjHeader = bodySj[1];
+            log.debug('mime', `SecureJoin detected from body text: ${sjHeader}`);
+        }
+    }
+    // Prefer invite number from whichever source we found
+    if (!sjInviteNumber) {
+        sjInviteNumber = (
+            innerHeaders['secure-join-invitenumber'] ||
+            headers['secure-join-invitenumber'] ||
+            ''
+        ).trim();
+        if (sjInviteNumber && !isSecureJoin) {
+            isSecureJoin = true;
+            if (!sjHeader) sjHeader = 'vc-request';
         }
     }
 
@@ -356,13 +503,19 @@ export async function parseIncoming(raw: IncomingMessage, ctx: ParseContext): Pr
     const editHeader = innerHeaders['chat-edit'] || headers['chat-edit'] || '';
     const isEdit = editHeader.length > 0;
 
-    // Read receipts (disposition notifications)
-    const disposition = (innerHeaders['chat-disposition'] || headers['chat-disposition'] || '').toLowerCase();
-    const originalMsgId =
-        innerHeaders['original-message-id'] ||
-        headers['original-message-id'] ||
-        '';
-    const isReadReceipt = disposition === 'display' && originalMsgId.length > 0;
+    // Read receipts — Delta Chat core uses RFC 6522 multipart/report MDNs;
+    // madcore also accepts Chat-Disposition: display (legacy dual header).
+    const mdn = detectReadReceipt({
+        headers,
+        innerHeaders,
+        outerSource: body,
+        innerSource: decryptedSource,
+        text,
+    });
+    const isReadReceipt = mdn.isReadReceipt;
+    const originalMsgId = mdn.readReceiptFor;
+    // Never surface MDN human part ("This is a receipt notification.") as chat text
+    if (isReadReceipt) text = '';
 
     // Ephemeral timer (control message or sticky on chat)
     const ephemeralRaw = innerHeaders['chat-ephemeral-timer'] || headers['chat-ephemeral-timer'];
@@ -430,8 +583,8 @@ export async function parseIncoming(raw: IncomingMessage, ctx: ParseContext): Pr
         isDelete,
         isSecureJoin,
         isVoiceMessage,
-        secureJoinStep: isSecureJoin ? sjHeader.trim() : undefined,
-        secureJoinInviteNumber: innerHeaders['secure-join-invitenumber'] || headers['secure-join-invitenumber'] || undefined,
+        secureJoinStep: isSecureJoin ? (sjHeader.trim() || 'vc-request') : undefined,
+        secureJoinInviteNumber: sjInviteNumber || undefined,
         secureJoinAuth: innerHeaders['secure-join-auth'] || headers['secure-join-auth'] || undefined,
         avatarUpdate: avatarData,
         attachments,

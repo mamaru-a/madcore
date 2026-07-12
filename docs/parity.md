@@ -99,3 +99,13 @@ madcore is a **web-native chatmail client**, not a wrapper around `@deltachat/js
 const caps = account.capabilities();
 // { calls: 'webrtc'|'signaling-only', webxdc: true, location: true, multiRelay: true }
 ```
+
+## JSON-RPC compatibility layer
+
+For a **full core-shaped method list** (same wire names / params as `deltachat-jsonrpc`), use:
+
+```ts
+import { createJsonRpcCompat, methodCoverage } from 'madcore/jsonrpc';
+```
+
+See [jsonrpc-compat.md](./jsonrpc-compat.md).

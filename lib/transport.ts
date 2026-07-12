@@ -76,7 +76,11 @@ export class Transport {
     /** Send a raw email. Transparent WS→REST fallback. */
     async send(from: string, to: string[], body: string): Promise<void> {
         if (this.isConnected) {
-            await this.wsRequest('send', { from, to, body });
+            const result = await this.wsRequest('send', { from, to, body });
+            log.info(
+                'transport',
+                `WS send ok from=${from} to=${to.join(',')} bytes=${body.length} result=${JSON.stringify(result)?.slice(0, 200)}`,
+            );
             return;
         }
         const res = await fetch(`${this.serverUrl}/webimap/send`, {
@@ -92,6 +96,7 @@ export class Transport {
             const errText = await res.text();
             throw new Error(`Send failed (${res.status}): ${errText}`);
         }
+        log.info('transport', `REST send ok from=${from} to=${to.join(',')} bytes=${body.length}`);
     }
 
     // ─── Fetch Messages ─────────────────────────────────────────────────

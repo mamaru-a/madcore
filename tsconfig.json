@@ -15,6 +15,6 @@
     "sourceMap": true,
     "forceConsistentCasingInFileNames": true
   },
-  "include": ["*.ts", "lib/**/*.ts", "account/**/*.ts"],
+  "include": ["*.ts", "lib/**/*.ts", "account/**/*.ts", "jsonrpc/**/*.ts"],
   "exclude": ["test/**/*", "dist/**/*", "node_modules/**/*"]
 }

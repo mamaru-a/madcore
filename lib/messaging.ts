@@ -18,6 +18,7 @@ import { log } from './logger.js';
  */
 
 import type { SDKContext } from './context.js';
+import { getKnownKey } from './crypto.js';
 import {
     buildFromHeader,
     buildInnerMultipart,
@@ -34,7 +35,7 @@ export async function sendTextMessage(ctx: SDKContext, toEmail: string, text: st
     const msgId = ctx.generateMsgId();
     const now = new Date().toUTCString();
     const fromHeader = buildFromHeader(ctx);
-    const peerKey = ctx.knownKeys.get(toEmail.toLowerCase());
+    const peerKey = getKnownKey(ctx.knownKeys, toEmail);
 
     if (peerKey && ctx.privateKey && ctx.publicKey) {
         // encrypt() wraps plaintext for Autocrypt-style text payloads (not raw MIME)
@@ -344,43 +345,143 @@ export async function forwardMessage(
     return sendTextMessage(ctx, toEmail, fwdText);
 }
 
-// ─── Read receipts (MDN-style) ───────────────────────────────────────────────────
+// ─── Read receipts (MDN / RFC 6522) ──────────────────────────────────────────────
+
+/** Ensure Message-ID is angle-bracketed like core / RFC 5322. */
+function normalizeRfc724Mid(id: string): string {
+    const t = (id || '').trim();
+    if (!t) return t;
+    if (t.startsWith('<') && t.endsWith('>')) return t;
+    return `<${t.replace(/^<|>$/g, '')}>`;
+}
+
+/**
+ * Build a Delta Chat–compatible MDN body (RFC 6522 multipart/report).
+ * Core: mimefactory::render_mdn — desktop peers only recognize this shape.
+ * Also includes Chat-Disposition + Original-Message-ID at the top for madcore peers.
+ */
+export function buildMdnMime(opts: {
+    fromHeader: string;
+    toEmail: string;
+    selfEmail: string;
+    originalMsgId: string;
+    boundary?: string;
+}): string {
+    const mid = normalizeRfc724Mid(opts.originalMsgId);
+    const boundary = opts.boundary || `mdn-${globalThis.crypto.randomUUID().slice(0, 8)}`;
+    const self = opts.selfEmail;
+    const machine = [
+        `Original-Recipient: rfc822;${self}`,
+        `Final-Recipient: rfc822;${self}`,
+        `Original-Message-ID: ${mid}`,
+        `Disposition: manual-action/MDN-sent-automatically; displayed`,
+        '',
+    ].join('\r\n');
+
+    return [
+        `Content-Type: multipart/report; report-type=disposition-notification; boundary="${boundary}"; protected-headers="v1"`,
+        opts.fromHeader,
+        `To: ${bracketEmail(opts.toEmail)}`,
+        `Chat-Version: 1.0`,
+        `Auto-Submitted: auto-replied`,
+        `In-Reply-To: ${mid}`,
+        // Dual headers so madcore can detect MDNs without walking report parts
+        `Chat-Disposition: display`,
+        `Original-Message-ID: ${mid}`,
+        '',
+        `--${boundary}`,
+        `Content-Type: text/plain; charset=utf-8`,
+        '',
+        // Untranslated on purpose (matches core — do not reveal language)
+        `This is a receipt notification.`,
+        '',
+        `--${boundary}`,
+        `Content-Type: message/disposition-notification`,
+        '',
+        machine,
+        `--${boundary}--`,
+    ].join('\r\n');
+}
 
 /**
  * Send a read receipt for an original message.
- * Wire: encrypted payload with Chat-Disposition: display + Original-Message-ID.
- * Matches Delta Chat's disposition-notification pattern over Autocrypt mail.
+ * Wire matches Delta Chat core (`MimeFactory::from_mdn` / `render_mdn`):
+ * multipart/report; report-type=disposition-notification + Original-Message-ID.
+ * Encrypts when a peer key is known; otherwise sends cleartext MDN.
  */
 export async function sendReadReceipt(
     ctx: SDKContext,
     toEmail: string,
     originalMsgId: string,
 ): Promise<string> {
+    const mid = normalizeRfc724Mid(originalMsgId);
+    if (!mid) throw new Error('sendReadReceipt: missing original Message-ID');
     const fromHeader = buildFromHeader(ctx);
-    const innerMime = buildInnerText(
-        [
-            `Content-Type: text/plain; charset="utf-8"; protected-headers="v1"`,
-            fromHeader,
-            `To: ${bracketEmail(toEmail)}`,
-            `Chat-Version: 1.0`,
-            `Chat-Disposition: display`,
-            `Original-Message-ID: ${originalMsgId}`,
-            `In-Reply-To: ${originalMsgId}`,
-        ],
-        '',
-    );
-
-    const msgId = await sendEncryptedMime(ctx, {
-        toEmail,
-        outerHeaders: [
-            `Chat-Disposition: display`,
-            `Original-Message-ID: ${originalMsgId}`,
-            `In-Reply-To: ${originalMsgId}`,
-        ],
-        innerMime,
+    const innerMime = buildMdnMime({
         fromHeader,
+        toEmail,
+        selfEmail: ctx.credentials.email,
+        originalMsgId: mid,
     });
-    log.info('messaging', `Sent read receipt for ${originalMsgId} → ${toEmail}`);
+
+    const peerKey = getKnownKey(ctx.knownKeys, toEmail);
+    if (peerKey && ctx.privateKey && ctx.publicKey) {
+        const msgId = await sendEncryptedMime(ctx, {
+            toEmail,
+            subject: 'Receipt Notification',
+            outerHeaders: [
+                `Auto-Submitted: auto-replied`,
+                `In-Reply-To: ${mid}`,
+                // Outer copies help when the outer is not fully decrypted yet
+                `Chat-Disposition: display`,
+                `Original-Message-ID: ${mid}`,
+            ],
+            innerMime,
+            fromHeader,
+        });
+        log.info('messaging', `Sent encrypted MDN for ${mid} → ${toEmail}`);
+        return msgId;
+    }
+
+    // Unencrypted fallback (core can also emit cleartext MDNs without peer key)
+    const msgId = ctx.generateMsgId();
+    const now = new Date().toUTCString();
+    // Rebuild with outer envelope headers (From/To/Message-ID live outside the report)
+    const boundary = `mdn-${globalThis.crypto.randomUUID().slice(0, 8)}`;
+    const machine = [
+        `Original-Recipient: rfc822;${ctx.credentials.email}`,
+        `Final-Recipient: rfc822;${ctx.credentials.email}`,
+        `Original-Message-ID: ${mid}`,
+        `Disposition: manual-action/MDN-sent-automatically; displayed`,
+        '',
+    ].join('\r\n');
+    const rawEmail = [
+        fromHeader,
+        `To: ${bracketEmail(toEmail)}`,
+        `Date: ${now}`,
+        `Message-ID: ${msgId}`,
+        `Subject: Receipt Notification`,
+        `Chat-Version: 1.0`,
+        `Auto-Submitted: auto-replied`,
+        `In-Reply-To: ${mid}`,
+        `Chat-Disposition: display`,
+        `Original-Message-ID: ${mid}`,
+        `MIME-Version: 1.0`,
+        `Content-Type: multipart/report; report-type=disposition-notification; boundary="${boundary}"`,
+        '',
+        `--${boundary}`,
+        `Content-Type: text/plain; charset=utf-8`,
+        '',
+        `This is a receipt notification.`,
+        '',
+        `--${boundary}`,
+        `Content-Type: message/disposition-notification`,
+        '',
+        machine,
+        `--${boundary}--`,
+    ].join('\r\n');
+    await ctx.sendRaw(ctx.credentials.email, [toEmail], rawEmail);
+    log.info('messaging', `Sent cleartext MDN for ${mid} → ${toEmail}`);
     return msgId;
 }
 
