@@ -61,18 +61,58 @@ export function summaryAndExit() {
     process.exit(failN > 0 ? 1 : 0);
 }
 
-export function requireLiveEnv(): { server: string; joinUri: string; joinTimeoutMs: number } {
-    const server = process.env.SERVER_URL;
-    const joinUri = process.env.JOIN_URI;
-    if (!server || !joinUri) {
-        console.error('SERVER_URL and JOIN_URI are required');
+export function parseLiveEnv(): { server: string; joinUri?: string; joinTimeoutMs: number } {
+    const server = process.env.SERVER_URL || process.argv[2];
+    if (!server) {
+        console.error('SERVER_URL is required');
         process.exit(2);
     }
     return {
         server,
-        joinUri,
+        joinUri: process.env.JOIN_URI,
         joinTimeoutMs: Number(process.env.JOIN_TIMEOUT_MS || 90_000),
     };
+}
+
+/** @deprecated Use parseLiveEnv — JOIN_URI is optional (local two-party mode). */
+export function requireLiveEnv(): { server: string; joinUri: string; joinTimeoutMs: number } {
+    const env = parseLiveEnv();
+    if (!env.joinUri) {
+        console.error('JOIN_URI is required for this entrypoint');
+        process.exit(2);
+    }
+    return { server: env.server, joinUri: env.joinUri, joinTimeoutMs: env.joinTimeoutMs };
+}
+
+export function resetHarness() {
+    rows.length = 0;
+}
+
+const sleep = (ms: number) => new Promise(r => setTimeout(r, ms));
+export { sleep };
+
+/** Wait for DC_EVENT_INCOMING_MSG with optional sender/text filters. */
+export function waitForIncomingMsg(
+    account: LiveAccount,
+    opts: { fromEmail?: string; textIncludes?: string; timeoutMs?: number } = {},
+): Promise<any> {
+    const timeoutMs = opts.timeoutMs ?? 60_000;
+    return new Promise((resolve, reject) => {
+        const timer = setTimeout(() => {
+            account.off('DC_EVENT_INCOMING_MSG', handler);
+            reject(new Error(`Timeout waiting for incoming msg (${timeoutMs}ms)`));
+        }, timeoutMs);
+        const handler = (e: any) => {
+            const msg = e.msg;
+            if (!msg) return;
+            if (opts.fromEmail && msg.from?.toLowerCase() !== opts.fromEmail.toLowerCase()) return;
+            if (opts.textIncludes && !msg.text?.includes(opts.textIncludes)) return;
+            clearTimeout(timer);
+            account.off('DC_EVENT_INCOMING_MSG', handler);
+            resolve(msg);
+        };
+        account.on('DC_EVENT_INCOMING_MSG', handler);
+    });
 }
 
 /** Tiny 1×1 PNG base64 (web-safe) */

@@ -1,0 +1,16 @@
+# Local e2e: madmail + run tests against it.
+#
+#   docker compose -f docker-compose.e2e.yml up -d madmail
+#   bash scripts/ci/start-madmail.sh   # if webimap not yet enabled
+#   SERVER_URL=http://127.0.0.1:8080 bun run test:ci-e2e
+#
+services:
+  madmail:
+    image: ghcr.io/themadorg/madmail:latest
+    container_name: madmail-e2e
+    environment:
+      MADDY_HOSTNAME: mail.ci.local
+      MADDY_DOMAIN: ci.local
+    ports:
+      - "8080:8080"
+    command: ["run", "--libexec", "/var/lib/madmail"]

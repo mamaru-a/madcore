@@ -1,38 +1,51 @@
 /**
- * Live E2E orchestrator — runs modular suites against madmail.
+ * CI / Actions E2E — full madcore ↔ madmail suite with local Alice↔Bob.
  *
- *   SERVER_URL=http://127.0.0.1:8080 bun run test:live-full
- *   SERVER_URL=https://… JOIN_URI='https://i.delta.chat/#…' bun run test:live-full
+ *   SERVER_URL=http://127.0.0.1:8080 bun run test:ci-e2e
+ *
+ * Optional: JOIN_URI for external peer (skips local two-party setup).
  */
-import {
-    parseLiveEnv,
-    summaryAndExit,
-    tryMethod,
-} from './harness';
-import { resolvePeerSetup } from './setup';
-import { runQrHelpers, runSecureJoinExtras } from './securejoin';
-import { runProfileSuite } from './profile';
-import { runMessagingSuite } from './messaging';
-import { runWebxdcSuite, runLocationSuite, runCallsSuite } from './webxdc-location-calls';
-import { runGroupsSuite } from './groups';
-import { runStoreChatSuite } from './store-chat';
-import { runConfigBackupSuite } from './config-backup';
+import { parseLiveEnv, summaryAndExit, tryMethod } from '../live/harness';
+import { resolvePeerSetup } from '../live/setup';
+import { runRestSuite } from '../live/rest';
+import { runSecuritySuite } from '../live/security';
+import { runDeliverySuite } from '../live/delivery';
+import { runQrHelpers, runSecureJoinExtras } from '../live/securejoin';
+import { runProfileSuite } from '../live/profile';
+import { runMessagingSuite } from '../live/messaging';
+import { runWebxdcSuite, runLocationSuite, runCallsSuite } from '../live/webxdc-location-calls';
+import { runGroupsSuite } from '../live/groups';
+import { runStoreChatSuite } from '../live/store-chat';
+import { runConfigBackupSuite } from '../live/config-backup';
 
 process.env.NODE_TLS_REJECT_UNAUTHORIZED = '0';
 
 async function main() {
     const { server, joinUri, joinTimeoutMs } = parseLiveEnv();
 
-    console.log('\n🚀 Full live E2E against madmail (modular suites)');
+    console.log('\n🧪 Madcore × Madmail — full CI E2E');
     console.log(`   Server: ${server}`);
-    console.log(`   Mode:   ${joinUri ? `external peer ${joinUri.slice(0, 56)}…` : 'local Alice↔Bob'}\n`);
+    console.log(`   Mode:   ${joinUri ? 'external peer (JOIN_URI)' : 'local Alice↔Bob'}\n`);
+
+    console.log('── REST API ──');
+    await runRestSuite(server);
 
     const setup = await resolvePeerSetup(server, joinUri, joinTimeoutMs);
     if (!setup) {
         summaryAndExit();
         return;
     }
-    const { dc, account: a, accountB: b, contact, contactId, peerEmail, joinUri: uri } = setup;
+
+    const { dc, account: a, accountB: b, contact, contactId, peerEmail, joinUri: uri, mode } = setup;
+    const aEmail = a.getCredentials().email;
+
+    console.log('\n── Security ──');
+    await runSecuritySuite(server, a, b);
+
+    if (mode === 'local' && b) {
+        console.log('\n── Bidirectional delivery ──');
+        await runDeliverySuite(a, b, aEmail, peerEmail);
+    }
 
     console.log('\n── Profile ──');
     await runProfileSuite(a, contact, peerEmail);
@@ -63,11 +76,9 @@ async function main() {
     console.log('\n── Teardown ──');
     await tryMethod('disconnect', () => { a.disconnect(); });
     if (b) await tryMethod('B.disconnect', () => { b.disconnect(); });
-
     await tryMethod('dc.listAccounts', () => `${dc.listAccounts().length}`);
     await tryMethod('dc.findAccountByEmail', () =>
-        dc.findAccountByEmail(a.getCredentials().email)?.id);
-    await tryMethod('dc.getAccount', () => dc.getAccount(a.id).id);
+        dc.findAccountByEmail(aEmail)?.id);
 
     summaryAndExit();
 }
