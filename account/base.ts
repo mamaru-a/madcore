@@ -22,7 +22,12 @@ import type {
     DCEvent,
     DCEventData,
 } from '../types.js';
-import { generateAccountId } from './utils.js';
+import {
+    dedupeRelaysByServerUrl,
+    generateAccountId,
+    normalizeServerUrl,
+    type RelayRecord,
+} from './utils.js';
 
 export abstract class AccountBase {
     // ── Identity ──
@@ -132,13 +137,14 @@ export abstract class AccountBase {
         this.store = store;
         this.id = id || generateAccountId();
         if (email && password && serverUrl) {
+            const url = normalizeServerUrl(serverUrl);
             const relayId = generateAccountId();
-            this.relays.set(relayId, { id: relayId, serverUrl, email, password });
+            this.relays.set(relayId, { id: relayId, serverUrl: url, email, password });
             this.primaryRelayId = relayId;
             // Create initial transport
             const t = new Transport();
-            t.configure(serverUrl, { email, password });
-            this.transports.set(serverUrl, t);
+            t.configure(url, { email, password });
+            this.transports.set(url, t);
         }
         // Bridge logger → DC_EVENT_INFO / WARNING / ERROR (browser-safe)
         this.logUnsub = addLogSink((level, tag, msg) => {
@@ -195,6 +201,15 @@ export abstract class AccountBase {
 
     /** Send raw message via primary transport (or first available) */
     protected async sendViaTransport(from: string, to: string[], body: string): Promise<void> {
+        // Re-bind primary credentials right before send so a stale transport
+        // config (after loadFromStore / multi-relay churn) cannot 401.
+        const creds = this.credentials;
+        const url = normalizeServerUrl(this.serverUrl);
+        if (creds.email && creds.password && url) {
+            const t = this.transports.get(url) || this.transport;
+            t.configure(url, { email: creds.email, password: creds.password });
+            if (!this.transports.has(url)) this.transports.set(url, t);
+        }
         return this.transport.send(from, to, body);
     }
 
@@ -204,43 +219,130 @@ export abstract class AccountBase {
 
     /** Register a new account on the given server (standalone usage) */
     async register(serverUrl: string, options?: { token?: string }): Promise<Credentials & { dclogin_url?: string }> {
+        const url = normalizeServerUrl(serverUrl);
         const t = new Transport();
-        const creds = await t.register(serverUrl, options);
-        t.configure(serverUrl, creds);
-        this.transports.set(serverUrl, t);
-        const relayId = generateAccountId();
-        this.relays.set(relayId, { id: relayId, serverUrl, email: creds.email, password: creds.password });
-        if (!this.primaryRelayId) this.primaryRelayId = relayId;
+        const creds = await t.register(url, options);
+        const relayId = this.upsertRelay(
+            { email: creds.email, password: creds.password, serverUrl: url },
+            true,
+        );
         if (this.store instanceof IndexedDBStore) {
             this.store.reopenForAccount(creds.email);
         }
         this.schedulePersist();
-        log.info('sdk', `Registered relay ${relayId}: ${creds.email} on ${serverUrl}`);
+        log.info('sdk', `Registered relay ${relayId}: ${creds.email} on ${url}`);
         return creds;
     }
 
     /** Set credentials manually (creates/updates primary relay) */
     setCredentials(email: string, password: string, serverUrl: string): void {
-        let relayId = '';
-        // Update existing relay for this server, or create new
-        for (const [id, r] of this.relays) {
-            if (r.serverUrl === serverUrl) { relayId = id; break; }
+        const url = normalizeServerUrl(serverUrl);
+        if (!email?.trim() || !password || !url) {
+            log.warn('sdk', 'setCredentials ignored: missing email, password, or serverUrl');
+            return;
         }
-        if (!relayId) {
-            relayId = generateAccountId();
-            this.relays.set(relayId, { id: relayId, serverUrl, email, password });
-        } else {
-            this.relays.set(relayId, { id: relayId, serverUrl, email, password });
+        // Upsert by serverUrl — never append a duplicate primary
+        this.upsertRelay({ email, password, serverUrl: url }, true);
+    }
+
+    /**
+     * Insert or update a single relay keyed by normalized serverUrl.
+     * Drops any other rows that share the same URL (repairs bloated snapshots).
+     */
+    protected upsertRelay(
+        relay: { email: string; password: string; serverUrl: string; id?: string },
+        makePrimary = false,
+        opts?: { persist?: boolean },
+    ): string {
+        const url = normalizeServerUrl(relay.serverUrl);
+        let keepId = relay.id || '';
+        // Prefer existing id for this URL; remove all other clones
+        for (const [id, r] of [...this.relays.entries()]) {
+            if (normalizeServerUrl(r.serverUrl) !== url) continue;
+            if (!keepId) keepId = id;
+            if (id !== keepId) this.relays.delete(id);
         }
-        // Update or create transport
-        let t = this.transports.get(serverUrl);
+        if (!keepId) keepId = generateAccountId();
+
+        const prev = this.relays.get(keepId);
+        const password =
+            relay.password ||
+            prev?.password ||
+            '';
+        const email = relay.email || prev?.email || '';
+        const unchanged =
+            prev &&
+            prev.email === email &&
+            prev.password === password &&
+            normalizeServerUrl(prev.serverUrl) === url &&
+            (!makePrimary || this.primaryRelayId === keepId);
+
+        this.relays.set(keepId, {
+            id: keepId,
+            serverUrl: url,
+            email,
+            password,
+        });
+
+        // Collapse transport keys for this URL
+        let t: Transport | undefined;
+        for (const [key, tr] of [...this.transports.entries()]) {
+            if (normalizeServerUrl(key) === url) {
+                if (!t) {
+                    t = tr;
+                    if (key !== url) {
+                        this.transports.delete(key);
+                        this.transports.set(url, tr);
+                    }
+                } else if (key !== url) {
+                    this.transports.delete(key);
+                }
+            }
+        }
         if (!t) {
             t = new Transport();
-            this.transports.set(serverUrl, t);
+            this.transports.set(url, t);
         }
-        t.configure(serverUrl, { email, password });
-        if (!this.primaryRelayId) this.primaryRelayId = relayId;
-        this.schedulePersist();
+        t.configure(url, { email, password });
+
+        if (makePrimary || !this.primaryRelayId || !this.relays.has(this.primaryRelayId)) {
+            this.primaryRelayId = keepId;
+        }
+        // Avoid write storms: reapplyVaultCredentials / connect call setCredentials often
+        if (opts?.persist !== false && !unchanged) {
+            this.schedulePersist();
+        }
+        return keepId;
+    }
+
+    /** Collapse duplicate serverUrl rows in memory (and transports). */
+    protected compactRelays(primaryUrl?: string): void {
+        const primary =
+            normalizeServerUrl(primaryUrl || this.primaryRelay.serverUrl || this.serverUrl);
+        const list = dedupeRelaysByServerUrl(this.relays.values());
+        // Ensure primary wins if present
+        if (primary) {
+            const hit = list.find(r => r.serverUrl === primary);
+            if (hit) {
+                // move to end of dedupe source already unique
+            }
+        }
+        this.relays.clear();
+        for (const r of list) this.relays.set(r.id, r);
+
+        // Drop orphan transports
+        const urls = new Set(list.map(r => r.serverUrl));
+        for (const key of [...this.transports.keys()]) {
+            if (!urls.has(normalizeServerUrl(key))) this.transports.delete(key);
+        }
+        // Prefer primary id for primaryUrl
+        if (primary) {
+            const p = list.find(r => r.serverUrl === primary);
+            if (p) this.primaryRelayId = p.id;
+            else if (list[0]) this.primaryRelayId = list[0].id;
+        } else if (!this.relays.has(this.primaryRelayId) && list[0]) {
+            this.primaryRelayId = list[0].id;
+        }
     }
 
     /**
@@ -288,16 +390,45 @@ export abstract class AccountBase {
             if (scoped) acct = scoped;
         }
 
-        // Restore relay
-        let relayId = '';
+        // Rebuild relays: one row per serverUrl (repairs 30+ duplicate primaries).
+        const memPassword = this.credentials.password || '';
+        const keepPassword =
+            (acct.password && acct.password.length > 0 ? acct.password : memPassword) || '';
+        const primaryUrl = normalizeServerUrl(acct.serverUrl);
+        const incoming: RelayRecord[] = [];
+        if (acct.relays?.length) {
+            for (const r of acct.relays) {
+                incoming.push({
+                    id: r.id,
+                    serverUrl: r.serverUrl,
+                    email: r.email,
+                    password: r.password || keepPassword,
+                });
+            }
+        }
+        // Top-level credentials always win for the primary server
+        incoming.push({
+            id: generateAccountId(),
+            serverUrl: primaryUrl,
+            email: acct.email,
+            password: keepPassword,
+        });
+        // Prefer stable id already in memory for primary URL
         for (const [id, r] of this.relays) {
-            if (r.serverUrl === acct.serverUrl) { relayId = id; break; }
+            if (normalizeServerUrl(r.serverUrl) === primaryUrl) {
+                incoming.push({
+                    id,
+                    serverUrl: primaryUrl,
+                    email: acct.email,
+                    password: keepPassword || r.password,
+                });
+            }
         }
-        if (!relayId) {
-            relayId = generateAccountId();
-        }
-        this.relays.set(relayId, { id: relayId, serverUrl: acct.serverUrl, email: acct.email, password: acct.password });
-        if (!this.primaryRelayId) this.primaryRelayId = relayId;
+        const unique = dedupeRelaysByServerUrl(incoming);
+        this.relays.clear();
+        for (const r of unique) this.relays.set(r.id, r);
+        const primary = unique.find(r => r.serverUrl === primaryUrl) || unique[0];
+        this.primaryRelayId = primary?.id || '';
 
         if (acct.privateKeyArmored) {
             this.privateKey = await openpgp.readPrivateKey({ armoredKey: acct.privateKeyArmored });
@@ -314,6 +445,9 @@ export abstract class AccountBase {
         this.profilePhotoChanged = false;
         this.lastSeenUid = acct.lastSeenUid || 0;
         if (this.lastSeenUid > 0) this.seenUIDs.add(this.lastSeenUid);
+        // Restore open SecureJoin invite so inviter can answer after reload
+        this.myInviteNumber = acct.secureJoinInviteNumber || '';
+        this.myAuthToken = acct.secureJoinAuthToken || '';
 
         // Restore known keys and contact registry from stored contacts
         for (const contact of await this.store.getAllContacts()) {
@@ -347,39 +481,35 @@ export abstract class AccountBase {
             }
         }
 
-        // Restore config + multi-relay
+        // Restore config
         if (acct.config) {
             for (const [k, v] of Object.entries(acct.config)) this.configBag.set(k, v);
             if (acct.config.watched_mailboxes) {
                 this.watchedMailboxes = acct.config.watched_mailboxes.split(',').map(s => s.trim()).filter(Boolean);
             }
         }
-        if (acct.relays) {
-            for (const r of acct.relays) {
-                this.relays.set(r.id, { ...r });
-                if (!this.transports.has(r.serverUrl)) {
-                    const t = new Transport();
-                    t.configure(r.serverUrl, { email: r.email, password: r.password });
-                    this.transports.set(r.serverUrl, t);
-                }
-            }
-        }
 
-        // Ensure a transport exists for the loaded server
-        if (!this.transports.has(acct.serverUrl)) {
+        // One transport per unique relay (no 32× duplicate sockets config)
+        this.transports.clear();
+        for (const r of this.relays.values()) {
+            const url = normalizeServerUrl(r.serverUrl);
             const t = new Transport();
-            t.configure(acct.serverUrl, { email: acct.email, password: acct.password });
-            this.transports.set(acct.serverUrl, t);
-        } else {
-            this.transports.get(acct.serverUrl)!.configure(acct.serverUrl, { email: acct.email, password: acct.password });
+            t.configure(url, { email: r.email, password: r.password });
+            this.transports.set(url, t);
         }
-        log.info('sdk', `Loaded account: ${acct.email} (groups=${this.groups.size}, lastUid=${this.lastSeenUid})`);
+        log.info(
+            'sdk',
+            `Loaded account: ${acct.email} (groups=${this.groups.size}, relays=${this.relays.size}, lastUid=${this.lastSeenUid})`,
+        );
         return true;
     }
 
     /** Save current account snapshot + contact keys to persistent store */
     async saveToStore(): Promise<void> {
         if (!this.credentials.email) return;
+
+        // Always compact before write so IDB never re-grows to 30+ clones
+        this.compactRelays(this.serverUrl);
 
         const groups: StoredGroup[] = [...this.groups.values()].map(g => ({
             grpId: g.grpId,
@@ -390,10 +520,22 @@ export abstract class AccountBase {
             broadcastSecret: g.broadcastSecret,
         }));
 
+        // Never persist an empty password over a previous good secret.
+        let passwordToSave = this.credentials.password;
+        if (!passwordToSave) {
+            try {
+                const prev = await this.store.getAccountByEmail(this.credentials.email)
+                    || await this.store.getAccount();
+                if (prev?.password) passwordToSave = prev.password;
+            } catch {
+                /* ignore */
+            }
+        }
+        const primaryUrl = normalizeServerUrl(this.serverUrl);
         const acct: StoredAccount = {
             email: this.credentials.email.toLowerCase(),
-            password: this.credentials.password,
-            serverUrl: this.serverUrl,
+            password: passwordToSave,
+            serverUrl: primaryUrl,
             displayName: this.displayName,
             fingerprint: this.fingerprint,
             privateKeyArmored: this.privateKey ? this.privateKey.armor() : '',
@@ -402,11 +544,17 @@ export abstract class AccountBase {
             profilePhotoB64: this.profilePhotoB64 || undefined,
             profilePhotoMime: this.profilePhotoMime || undefined,
             config: Object.fromEntries(this.configBag),
-            relays: [...this.relays.values()].map(r => ({
-                id: r.id, serverUrl: r.serverUrl, email: r.email, password: r.password,
+            // Always persist deduped relays (one per serverUrl)
+            relays: dedupeRelaysByServerUrl(this.relays.values()).map(r => ({
+                id: r.id,
+                serverUrl: r.serverUrl,
+                email: r.email,
+                password: r.password,
             })),
             groups,
             lastSeenUid: this.lastSeenUid || undefined,
+            secureJoinInviteNumber: this.myInviteNumber || undefined,
+            secureJoinAuthToken: this.myAuthToken || undefined,
         };
         await this.store.saveAccount(acct);
 
@@ -472,16 +620,31 @@ export abstract class AccountBase {
 
         if (!targetUrl) throw new Error('No server URL. Call register() or addRelay() first.');
 
+        targetUrl = normalizeServerUrl(targetUrl);
+
         // Find the relay credentials for this server URL
         let relayCreds: Credentials = this.credentials;
         for (const [, r] of this.relays) {
-            if (r.serverUrl === targetUrl) {
+            if (normalizeServerUrl(r.serverUrl) === targetUrl) {
                 relayCreds = { email: r.email, password: r.password };
                 break;
             }
         }
 
         let t = this.transports.get(targetUrl);
+        if (!t) {
+            // Legacy key without normalize
+            for (const [key, tr] of this.transports) {
+                if (normalizeServerUrl(key) === targetUrl) {
+                    t = tr;
+                    if (key !== targetUrl) {
+                        this.transports.delete(key);
+                        this.transports.set(targetUrl, tr);
+                    }
+                    break;
+                }
+            }
+        }
         if (!t) {
             t = new Transport();
             t.configure(targetUrl, relayCreds);
@@ -492,14 +655,28 @@ export abstract class AccountBase {
 
         // Set up push handler for incoming messages
         t.setPushHandler(async (msg: any) => {
-            if (msg.action === 'new_message') {
-                await this.handlePushMessage(msg.data);
+            // madmail: action "new_message" with summary { uid, ... }
+            // some docs also mention "push" with optional body
+            if (msg.action === 'new_message' || msg.action === 'push') {
+                try {
+                    await this.handlePushMessage(msg.data ?? msg);
+                } catch (e: any) {
+                    log.warn('sdk', `push handle failed: ${e?.message || e}`);
+                }
             } else {
                 log.debug('sdk', `WS[${targetUrl}] unknown push:`, msg.action, msg);
             }
         });
 
-        await t.connect(sinceUID);
+        try {
+            await t.connect(sinceUID);
+        } catch (e: any) {
+            const msg = e?.message || String(e);
+            throw new Error(
+                `WebIMAP WebSocket connect failed for ${targetUrl}: ${msg}. ` +
+                `Use a madmail host with webimap enabled (classic chatmail without WebIMAP cannot serve the browser client).`,
+            );
+        }
         log.info('sdk', `Connected transport: ${targetUrl}`);
         this.emit('DC_EVENT_CONNECTIVITY_CHANGED', {
             event: 'DC_EVENT_CONNECTIVITY_CHANGED',
@@ -616,12 +793,20 @@ export abstract class AccountBase {
 
     /** Get the full status of this account including all relay connection states */
     status(): AccountStatus {
+        // Safety net: never surface duplicate serverUrl rows to apps
+        if (this.relays.size > 1) {
+            const urls = new Set(
+                [...this.relays.values()].map(r => normalizeServerUrl(r.serverUrl)),
+            );
+            if (urls.size < this.relays.size) this.compactRelays();
+        }
         const relayList: RelayInfo[] = [];
         for (const [, r] of this.relays) {
-            const t = this.transports.get(r.serverUrl);
+            const url = normalizeServerUrl(r.serverUrl);
+            const t = this.transports.get(url) || this.transports.get(r.serverUrl);
             relayList.push({
                 id: r.id,
-                serverUrl: r.serverUrl,
+                serverUrl: url,
                 email: r.email,
                 password: r.password,
                 isConnected: t?.isConnected ?? false,
@@ -664,37 +849,60 @@ export abstract class AccountBase {
      * ```
      */
     async addRelay(serverUrl: string, opts?: { email: string; password: string }): Promise<RelayInfo> {
-        const relayId = generateAccountId();
+        const url = normalizeServerUrl(serverUrl);
         let email: string, password: string;
 
+        // Already have this host → update in place (do not grow duplicates)
+        for (const r of this.relays.values()) {
+            if (normalizeServerUrl(r.serverUrl) === url && opts) {
+                const id = this.upsertRelay({
+                    id: r.id,
+                    email: opts.email,
+                    password: opts.password,
+                    serverUrl: url,
+                }, false);
+                return {
+                    id,
+                    serverUrl: url,
+                    email: opts.email,
+                    password: opts.password,
+                    isConnected: this.transports.get(url)?.isConnected ?? false,
+                    state: this.transports.get(url)?.state ?? 'disconnected',
+                };
+            }
+            if (normalizeServerUrl(r.serverUrl) === url && !opts) {
+                // Same server without new creds — return existing, do not re-register
+                return {
+                    id: r.id,
+                    serverUrl: url,
+                    email: r.email,
+                    password: r.password,
+                    isConnected: this.transports.get(url)?.isConnected ?? false,
+                    state: this.transports.get(url)?.state ?? 'disconnected',
+                };
+            }
+        }
+
         if (opts) {
-            // Use existing credentials
             email = opts.email;
             password = opts.password;
         } else {
             // Register new identity on this server
             const t = new Transport();
-            const creds = await t.register(serverUrl);
+            const creds = await t.register(url);
             email = creds.email;
             password = creds.password;
         }
 
-        // Store relay
-        this.relays.set(relayId, { id: relayId, serverUrl, email, password });
-        this.schedulePersist();
+        const relayId = this.upsertRelay(
+            { email, password, serverUrl: url },
+            !this.primaryRelayId,
+        );
 
-        // Create transport
-        const t = new Transport();
-        t.configure(serverUrl, { email, password });
-        this.transports.set(serverUrl, t);
-
-        // If no primary, set this
-        if (!this.primaryRelayId) this.primaryRelayId = relayId;
-
-        log.info('sdk', `Added relay ${relayId}: ${email} on ${serverUrl}`);
+        log.info('sdk', `Added relay ${relayId}: ${email} on ${url}`);
         return {
             id: relayId,
-            serverUrl,
+            serverUrl: url,
             email,
             password,
             isConnected: false,
@@ -738,21 +946,46 @@ export abstract class AccountBase {
 
     protected generateMsgId(): string {
         const id = globalThis.crypto.randomUUID().replace(/-/g, '').slice(0, 16);
-        return `<${id}@${this.credentials.email.split('@')[1]}>`;
+        let host = this.credentials.email.split('@').pop() || 'localhost';
+        // IP-literal addresses: user@[203.0.113.1]
+        if (host.startsWith('[') && host.endsWith(']')) host = host.slice(1, -1);
+        return `<${id}@${host}>`;
     }
 
 
-    /** Handle a WS push message (new_message) */
+    /** Handle a WS push message (new_message / push) */
     protected async handlePushMessage(summary: any): Promise<void> {
         // Dedup is handled inside processIncomingRaw
+        const uid = Number(summary?.uid ?? summary?.summary?.uid ?? 0);
+        // Some servers include the full body in the push payload
+        if (summary?.body && typeof summary.body === 'string') {
+            await this.processIncomingRaw({
+                uid: uid > 0 ? uid : 0,
+                body: summary.body,
+                envelope: summary.envelope ?? summary.summary?.envelope,
+            });
+            return;
+        }
+        if (!uid) {
+            log.warn('sdk', 'push without uid/body — ignored', summary);
+            return;
+        }
         let raw: IncomingMessage;
         try {
-            const detail = await this.transport.wsRequest('fetch', { uid: summary.uid });
-            raw = { uid: detail.uid, body: detail.body, envelope: detail.envelope };
+            const detail = await this.transport.wsRequest('fetch', { mailbox: 'INBOX', uid });
+            // madmail flattens MessageDetail: { uid, body, envelope, ... }
+            raw = {
+                uid: Number(detail?.uid ?? detail?.summary?.uid ?? uid),
+                body: detail?.body || '',
+                envelope: detail?.envelope ?? detail?.summary?.envelope,
+            };
         } catch {
-            raw = await this.transport.fetchMessage(summary.uid);
+            raw = await this.transport.fetchMessage(uid);
         }
-
+        if (!raw.body) {
+            log.warn('sdk', `push fetch uid ${uid}: empty body`);
+            return;
+        }
         await this.processIncomingRaw(raw);
     }
 

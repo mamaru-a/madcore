@@ -117,6 +117,11 @@ export function extractAutocryptKeydata(armoredKey: string): string {
     return b64Lines.join('');
 }
 
+/** Normalize email for Autocrypt/map keys (keep IP-literal brackets). */
+export function normalizeEmailAddr(email: string): string {
+    return email.trim().toLowerCase();
+}
+
 /** Build the Autocrypt header string (folded at 76 chars) */
 export function buildAutocryptHeader(email: string, autocryptKeydata: string): string {
     let folded = '';
@@ -124,7 +129,8 @@ export function buildAutocryptHeader(email: string, autocryptKeydata: string): s
         if (i > 0) folded += '\r\n ';
         folded += autocryptKeydata.substring(i, i + 76);
     }
-    return `Autocrypt: addr=${email}; prefer-encrypt=mutual;\r\n keydata=${folded}`;
+    // Use the live account address as-is (including user@[ip] form)
+    return `Autocrypt: addr=${normalizeEmailAddr(email)}; prefer-encrypt=mutual;\r\n keydata=${folded}`;
 }
 
 /** Import an Autocrypt key from a header value, returns email + armored key or null */
@@ -133,10 +139,26 @@ export function parseAutocryptHeader(headerValue: string): { addr: string; armor
     const keydataMatch = headerValue.match(/keydata=(.+)/is);
     if (!addrMatch || !keydataMatch) return null;
 
-    const addr = addrMatch[1].trim().toLowerCase();
+    const addr = normalizeEmailAddr(addrMatch[1]);
     const keydata = keydataMatch[1].replace(/\s/g, '');
     const armoredKey = `-----BEGIN PGP PUBLIC KEY BLOCK-----\n\n${keydata}\n-----END PGP PUBLIC KEY BLOCK-----`;
     return { addr, armoredKey };
+}
+
+/** Store a peer key under primary + common IP-literal alias forms. */
+export function rememberPeerKey(knownKeys: Map<string, string>, addr: string, armoredKey: string): void {
+    const primary = normalizeEmailAddr(addr);
+    knownKeys.set(primary, armoredKey);
+    // Alias: user@1.2.3.4 ↔ user@[1.2.3.4]
+    const m = primary.match(/^([^@]+)@\[([^\]]+)\]$/);
+    if (m) {
+        knownKeys.set(`${m[1]}@${m[2]}`, armoredKey);
+        return;
+    }
+    const m2 = primary.match(/^([^@]+)@(\d{1,3}(?:\.\d{1,3}){3})$/);
+    if (m2) {
+        knownKeys.set(`${m2[1]}@[${m2[2]}]`, armoredKey);
+    }
 }
 /** Parse an armored public key and return its fingerprint */
 export async function getFingerprintFromArmored(armoredKey: string): Promise<string> {

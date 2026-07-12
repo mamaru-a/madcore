@@ -27,27 +27,47 @@ export function randomToken(len: number): string {
 
 /** Parse a SecureJoin invite URI */
 export function parseSecureJoinURI(uri: string): SecureJoinParsed {
-    const hashIdx = uri.indexOf('#');
+    // Tolerate whitespace / newlines from paste or QR readers
+    const cleaned = (uri || '').trim().replace(/\s+/g, '');
+    const hashIdx = cleaned.indexOf('#');
     if (hashIdx < 0) throw new Error('Invalid SecureJoin URI: missing # fragment');
-    const fragment = uri.substring(hashIdx + 1);
+    const fragment = cleaned.substring(hashIdx + 1);
 
     // First segment before & is the fingerprint
     const fpEnd = fragment.indexOf('&');
     const fingerprint = fpEnd >= 0 ? fragment.substring(0, fpEnd) : fragment;
 
-    // Parse remaining params
+    // Parse remaining params — split only on first `=` so values may contain `=`
     const paramStr = fpEnd >= 0 ? fragment.substring(fpEnd + 1) : '';
     const params: Record<string, string> = {};
     for (const kv of paramStr.split('&')) {
-        const [k, v] = kv.split('=');
-        if (k && v) params[k] = decodeURIComponent(v);
+        if (!kv) continue;
+        const eq = kv.indexOf('=');
+        if (eq < 0) continue;
+        const k = kv.substring(0, eq);
+        const v = kv.substring(eq + 1);
+        if (!k || !v) continue;
+        try {
+            // `+` in query-style names should be space; encodeURIComponent uses %20
+            params[k] = decodeURIComponent(v.replace(/\+/g, ' '));
+        } catch {
+            params[k] = v;
+        }
+    }
+
+    const inviterEmail = (params.a || '').trim();
+    if (!fingerprint) {
+        throw new Error('Invalid SecureJoin URI: missing fingerprint');
+    }
+    if (!inviterEmail.includes('@')) {
+        throw new Error('Invalid SecureJoin URI: missing inviter address (a=)');
     }
 
     return {
         fingerprint,
         inviteNumber: params.i || params.j || '',  // `j` is used for broadcasts
         auth: params.s || '',
-        inviterEmail: params.a || '',
+        inviterEmail,
         name: params.n || '',
         groupId: params.x,                          // `x` = grpid (group or broadcast)
         groupName: params.g,                         // `g` = group name
@@ -166,21 +186,34 @@ export function generateSecureJoinURI(
         throw new Error('Must register and generate keys before creating invite URI');
     }
     const fp = ctx.fingerprint;
+    // encodeURIComponent keeps IP-literal brackets as %5B/%5D (required for a=)
     const email = encodeURIComponent(ctx.credentials.email);
     const name = encodeURIComponent(ctx.displayName || ctx.credentials.email.split('@')[0]);
-    return `https://i.delta.chat/#${fp}&i=${inviteNumber}&s=${authToken}&a=${email}&n=${name}`;
+    // v=3 matches current Delta Chat invite format (ignored by parsers that don't need it)
+    return `https://i.delta.chat/#${fp}&v=3&i=${inviteNumber}&s=${authToken}&a=${email}&n=${name}`;
 }
 
-/** Send vc-request / vg-request SecureJoin handshake (Phase 1) */
-export async function sendSecureJoinRequest(
+/** Domain part for Message-ID — handles IP-literal emails user@[1.2.3.4]. */
+function msgIdDomain(email: string): string {
+    const at = email.lastIndexOf('@');
+    if (at < 0) return 'localhost';
+    let host = email.slice(at + 1);
+    if (host.startsWith('[') && host.endsWith(']')) host = host.slice(1, -1);
+    return host || 'localhost';
+}
+
+/**
+ * Unencrypted Secure-Join step as multipart/mixed (madmail/chatmail requirement).
+ * Body must start with `secure-join: <step>` or the relay rejects it.
+ */
+export async function sendSecureJoinPlainStep(
     ctx: SDKContext,
     toEmail: string,
-    inviteNumber: string,
-    grpId?: string
+    step: string,
+    extraHeaders: string[] = [],
 ): Promise<void> {
-    const step = grpId ? 'vg-request' : 'vc-request';
     const id = crypto.randomUUID().replace(/-/g, '').slice(0, 16);
-    const msgId = `<${id}@${ctx.credentials.email.split('@')[1]}>`;
+    const msgId = `<${id}@${msgIdDomain(ctx.credentials.email)}>`;
     const boundary = 'securejoin-' + id;
     const now = new Date().toUTCString();
     const fromHeader = ctx.displayName
@@ -195,21 +228,36 @@ export async function sendSecureJoinRequest(
         `Subject: [...]`,
         `Chat-Version: 1.0`,
         `Secure-Join: ${step}`,
-        `Secure-Join-Invitenumber: ${inviteNumber}`,
+        ...extraHeaders,
         ctx.buildAutocryptHeader(),
-        `Content-Type: multipart/mixed; boundary="${boundary}"`,
         `MIME-Version: 1.0`,
+        `Content-Type: multipart/mixed; boundary="${boundary}"`,
         '',
         `--${boundary}`,
         'Content-Type: text/plain; charset=utf-8',
         '',
+        // Madmail: body must contain `secure-join:` (header-only is rejected)
         `secure-join: ${step}`,
         '',
         `--${boundary}--`,
+        '',
     ].join('\r\n');
 
     await ctx.sendRaw(ctx.credentials.email, [toEmail], rawEmail);
     log.info('securejoin', `Sent ${step} to ${toEmail}`);
+}
+
+/** Send vc-request / vg-request SecureJoin handshake (Phase 1) */
+export async function sendSecureJoinRequest(
+    ctx: SDKContext,
+    toEmail: string,
+    inviteNumber: string,
+    grpId?: string
+): Promise<void> {
+    const step = grpId ? 'vg-request' : 'vc-request';
+    await sendSecureJoinPlainStep(ctx, toEmail, step, [
+        `Secure-Join-Invitenumber: ${inviteNumber}`,
+    ]);
 }
 
 /** Send Phase 3: vc-request-with-auth (encrypted, includes auth token + fingerprint) */
@@ -286,73 +334,57 @@ export async function handleIncomingSecureJoin(
     const step = msg.secureJoinStep?.trim();
     if (!step) return;
 
-    if (step === 'vc-request') {
+    if (step === 'vc-request' || step === 'vg-request') {
         const incomingInviteNum = msg.secureJoinInviteNumber || msg.innerHeaders['secure-join-invitenumber'] || msg.headers['secure-join-invitenumber'] || '';
-        if (incomingInviteNum !== myInviteNumber) {
-            log.warn('securejoin', `Invite number mismatch: got "${incomingInviteNum}", expected "${myInviteNumber}"`);
+        if (!myInviteNumber || incomingInviteNum !== myInviteNumber) {
+            log.warn('securejoin', `Invite number mismatch: got "${incomingInviteNum}", expected "${myInviteNumber || '(none)'}"`);
             return;
         }
-        log.info('securejoin', `Received vc-request from ${msg.from} — sending vc-auth-required`);
-        const peerKey = ctx.knownKeys.get(msg.from.toLowerCase());
-        if (peerKey) {
-            await sendSecureJoinAuth(ctx, msg.from, 'vc-auth-required', myAuthToken);
-        } else {
-            await sendSecureJoinRequest(ctx, msg.from, myInviteNumber);
-            const fromHeader = ctx.displayName
-                ? `From: "${ctx.displayName}" <${ctx.credentials.email}>`
-                : `From: <${ctx.credentials.email}>`;
-            const sjMsgId = ctx.generateMsgId();
-            const rawEmail = [
-                fromHeader,
-                `To: <${msg.from}>`,
-                `Date: ${new Date().toUTCString()}`,
-                `Message-ID: ${sjMsgId}`,
-                `Subject: [...]`,
-                `Chat-Version: 1.0`,
-                `Secure-Join: vc-auth-required`,
-                ctx.buildAutocryptHeader(),
-                `Content-Type: text/plain; charset=utf-8`,
-                `MIME-Version: 1.0`,
-                '',
-                ''
-            ].join('\r\n');
-            await ctx.sendRaw(ctx.credentials.email, [msg.from], rawEmail);
-            log.info('securejoin', `Sent vc-auth-required (unencrypted with Autocrypt) to ${msg.from}`);
-        }
-    } else if (step === 'vc-request-with-auth') {
+        // Phase 2: reply with *-auth-required + Autocrypt so the joiner learns
+        // our public key. Madmail only accepts unencrypted SecureJoin as
+        // multipart/mixed with body prefix `secure-join:` (header-only text/plain
+        // is rejected as Invalid Unencrypted Mail).
+        const authStep = step === 'vg-request' ? 'vg-auth-required' : 'vc-auth-required';
+        log.info('securejoin', `Received ${step} from ${msg.from} — sending ${authStep}`);
+        await sendSecureJoinPlainStep(ctx, msg.from, authStep);
+        log.info('securejoin', `Sent ${authStep} (Autocrypt multipart) to ${msg.from}`);
+    } else if (step === 'vc-request-with-auth' || step === 'vg-request-with-auth') {
         const incomingAuth = msg.secureJoinAuth || msg.innerHeaders['secure-join-auth'] || msg.headers['secure-join-auth'] || '';
-        if (incomingAuth !== myAuthToken) {
-            log.warn('securejoin', `Auth token mismatch: got "${incomingAuth}", expected "${myAuthToken}"`);
+        if (!myAuthToken || incomingAuth !== myAuthToken) {
+            log.warn('securejoin', `Auth token mismatch: got "${incomingAuth}", expected "${myAuthToken || '(none)'}"`);
             return;
         }
-        log.info('securejoin', `Received vc-request-with-auth from ${msg.from} — sending vc-contact-confirm`);
+        const confirmStep = step === 'vg-request-with-auth' ? 'vg-member-added' : 'vc-contact-confirm';
+        log.info('securejoin', `Received ${step} from ${msg.from} — sending ${confirmStep}`);
         const peerKey = ctx.knownKeys.get(msg.from.toLowerCase());
-        if (peerKey) {
-            const innerMime = [
-                `Content-Type: text/plain; charset="utf-8"; protected-headers="v1"`,
-                `From: <${ctx.credentials.email}>`,
-                `To: <${msg.from}>`,
-                `Date: ${new Date().toUTCString()}`,
-                `Chat-Version: 1.0`,
-                `Secure-Join: vc-contact-confirm`,
-                '',
-                ''
-            ].join('\r\n');
-            const armored = await ctx.encryptRaw(innerMime, peerKey);
-            const confirmMsgId = ctx.generateMsgId();
-            const rawEmail = buildPgpMimeEnvelope({
-                fromHeader: `From: <${ctx.credentials.email}>`,
-                toHeader: `<${msg.from}>`,
-                msgId: confirmMsgId,
-                date: new Date().toUTCString(),
-                subject: '[...]',
-                outerHeaders: [`Secure-Join: vc-contact-confirm`],
-                autocryptHeader: ctx.buildAutocryptHeader(),
-                armored,
-            });
-            await ctx.sendRaw(ctx.credentials.email, [msg.from], rawEmail);
-            log.info('securejoin', `Sent vc-contact-confirm (encrypted) to ${msg.from}`);
+        if (!peerKey) {
+            log.warn('securejoin', `No key for ${msg.from} — cannot encrypt ${confirmStep}`);
+            return;
         }
+        const innerMime = [
+            `Content-Type: text/plain; charset="utf-8"; protected-headers="v1"`,
+            `From: <${ctx.credentials.email}>`,
+            `To: <${msg.from}>`,
+            `Date: ${new Date().toUTCString()}`,
+            `Chat-Version: 1.0`,
+            `Secure-Join: ${confirmStep}`,
+            '',
+            '',
+        ].join('\r\n');
+        const armored = await ctx.encryptRaw(innerMime, peerKey);
+        const confirmMsgId = ctx.generateMsgId();
+        const rawEmail = buildPgpMimeEnvelope({
+            fromHeader: `From: <${ctx.credentials.email}>`,
+            toHeader: `<${msg.from}>`,
+            msgId: confirmMsgId,
+            date: new Date().toUTCString(),
+            subject: '[...]',
+            outerHeaders: [`Secure-Join: ${confirmStep}`],
+            autocryptHeader: ctx.buildAutocryptHeader(),
+            armored,
+        });
+        await ctx.sendRaw(ctx.credentials.email, [msg.from], rawEmail);
+        log.info('securejoin', `Sent ${confirmStep} (encrypted) to ${msg.from}`);
     }
 }
 

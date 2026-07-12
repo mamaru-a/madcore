@@ -14,6 +14,7 @@ export abstract class AccountMessaging extends AccountContacts {
         await this.getOrCreateChat(toEmail);
         const chat = await this.store.getChat(chatId);
         const timerSec = chat?.ephemeralTimer || 0;
+        const peerHasKey = this.knownKeys.has(toEmail.toLowerCase());
         const message: StoredMessage = {
             id: msgId,
             chatId,
@@ -21,7 +22,8 @@ export abstract class AccountMessaging extends AccountContacts {
             to: toEmail,
             text,
             timestamp: now,
-            encrypted: true,
+            // Only claim encryption when we actually have a peer key (matches send path).
+            encrypted: peerHasKey && !!this.privateKey && !!this.publicKey,
             direction: 'outgoing',
             type: 'text',
             state: 'sent',

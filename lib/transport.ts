@@ -28,6 +28,11 @@ export class Transport {
         resolve: (data: any) => void;
         reject: (err: Error) => void;
     }> = new Map();
+    /** When true, onclose will not schedule reconnect (user called disconnect). */
+    private intentionalClose = false;
+    private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+    private reconnectAttempt = 0;
+    private lastSinceUID = 0;
 
     // Push handler — set by SDK to dispatch incoming messages
     private onPush: OnPushMessage | null = null;
@@ -73,11 +78,43 @@ export class Transport {
 
     // ─── Send (WS preferred, REST fallback) ─────────────────────────────
 
-    /** Send a raw email. Transparent WS→REST fallback. */
+    /**
+     * True when a WS error is a connection drop (safe to retry via REST).
+     * Protocol / auth / encryption rejections must not be masked by a REST 401.
+     */
+    private isTransportLevelError(err: unknown): boolean {
+        const msg = err instanceof Error ? err.message : String(err ?? '');
+        return /websocket|not connected|closed|timeout|network|failed to fetch|ECONN|socket/i.test(
+            msg,
+        );
+    }
+
+    /** Send a raw email. WS preferred; REST only on transport failure. */
     async send(from: string, to: string[], body: string): Promise<void> {
+        if (!this.credentials.email || !this.credentials.password) {
+            throw new Error(
+                'Send failed: missing account credentials on transport. ' +
+                'Call setCredentials / reconnect before sending.',
+            );
+        }
+
         if (this.isConnected) {
-            await this.wsRequest('send', { from, to, body });
-            return;
+            try {
+                await this.wsRequest('send', { from, to, body });
+                return;
+            } catch (e: any) {
+                if (!this.isTransportLevelError(e)) {
+                    // e.g. encryption-needed, invalid payload — surface as-is
+                    throw e instanceof Error ? e : new Error(String(e));
+                }
+                log.warn('transport', `WS send failed, trying REST: ${e?.message || e}`);
+            }
+        }
+        if (!this.serverUrl) {
+            throw new Error(
+                'Not connected: WebSocket is down and no server URL for REST send. ' +
+                'Reconnect or use a chatmail host with WebIMAP enabled.',
+            );
         }
         const res = await fetch(`${this.serverUrl}/webimap/send`, {
             method: 'POST',
@@ -90,6 +127,18 @@ export class Transport {
         });
         if (!res.ok) {
             const errText = await res.text();
+            if (res.status === 404) {
+                throw new Error(
+                    'Send failed: this server has no WebIMAP /webimap/send (HTTP 404). ' +
+                    'Use a madmail host with webimap (and websmtp) enabled.',
+                );
+            }
+            if (res.status === 401 || res.status === 403) {
+                throw new Error(
+                    `Send failed (${res.status}): invalid credentials for ${this.credentials.email}. ` +
+                    'Password rejected by the relay — re-login or re-register.',
+                );
+            }
             throw new Error(`Send failed (${res.status}): ${errText}`);
         }
     }
@@ -125,14 +174,33 @@ export class Transport {
     // ─── Generic WS Request ─────────────────────────────────────────────
 
     /** Send a bidirectional WS request and wait for the correlated response */
-    wsRequest(action: string, data: Record<string, any> = {}): Promise<any> {
+    wsRequest(action: string, data: Record<string, any> = {}, timeoutMs = 20_000): Promise<any> {
         return new Promise((resolve, reject) => {
             if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
                 return reject(new Error('WebSocket not connected'));
             }
             const req_id = String(++this.reqCounter);
-            this.pendingRequests.set(req_id, { resolve, reject });
-            this.ws.send(JSON.stringify({ req_id, action, data }));
+            const timer = setTimeout(() => {
+                this.pendingRequests.delete(req_id);
+                reject(new Error(`WebSocket request timed out: ${action}`));
+            }, timeoutMs);
+            this.pendingRequests.set(req_id, {
+                resolve: (v) => {
+                    clearTimeout(timer);
+                    resolve(v);
+                },
+                reject: (e) => {
+                    clearTimeout(timer);
+                    reject(e);
+                },
+            });
+            try {
+                this.ws.send(JSON.stringify({ req_id, action, data }));
+            } catch (e: any) {
+                clearTimeout(timer);
+                this.pendingRequests.delete(req_id);
+                reject(e instanceof Error ? e : new Error(String(e)));
+            }
         });
     }
 
@@ -142,28 +210,48 @@ export class Transport {
     connect(sinceUID = 0): Promise<void> {
         if (this.isConnected) return Promise.resolve();
         if (this.ws && this.ws.readyState === WebSocket.CONNECTING) return Promise.resolve();
-        
+
+        this.intentionalClose = false;
+        this.lastSinceUID = sinceUID || this.lastSinceUID;
+        if (this.reconnectTimer) {
+            clearTimeout(this.reconnectTimer);
+            this.reconnectTimer = null;
+        }
+
         // Disconnect if we have a stale instance
-        if (this.ws) this.ws.close();
+        if (this.ws) {
+            try {
+                this.ws.onclose = null;
+                this.ws.close();
+            } catch {
+                /* ignore */
+            }
+            this.ws = null;
+        }
 
         return new Promise((resolve, reject) => {
             let url: string;
             if (this.serverUrl) {
                 const wsProto = this.serverUrl.startsWith('https') ? 'wss' : 'ws';
                 const host = this.serverUrl.replace(/^https?:\/\//, '');
-                url = `${wsProto}://${host}/webimap/ws?email=${encodeURIComponent(this.credentials.email)}&password=${encodeURIComponent(this.credentials.password)}&mailbox=INBOX&since_uid=${sinceUID}`;
+                url = `${wsProto}://${host}/webimap/ws?email=${encodeURIComponent(this.credentials.email)}&password=${encodeURIComponent(this.credentials.password)}&mailbox=INBOX&since_uid=${this.lastSinceUID}`;
             } else {
                 // Proxy mode: use current page host (Vite dev proxy)
                 const loc = globalThis.location || { protocol: 'http:', host: 'localhost' };
                 const wsProto = loc.protocol === 'https:' ? 'wss' : 'ws';
-                url = `${wsProto}://${loc.host}/webimap/ws?email=${encodeURIComponent(this.credentials.email)}&password=${encodeURIComponent(this.credentials.password)}&mailbox=INBOX&since_uid=${sinceUID}`;
+                url = `${wsProto}://${loc.host}/webimap/ws?email=${encodeURIComponent(this.credentials.email)}&password=${encodeURIComponent(this.credentials.password)}&mailbox=INBOX&since_uid=${this.lastSinceUID}`;
             }
 
             this.ws = new WebSocket(url);
+            let settled = false;
 
             this.ws!.onopen = () => {
                 log.info('transport', 'WebSocket connected');
-                resolve();
+                this.reconnectAttempt = 0;
+                if (!settled) {
+                    settled = true;
+                    resolve();
+                }
             };
 
             this.ws!.onmessage = (event: any) => {
@@ -196,21 +284,48 @@ export class Transport {
 
             this.ws!.onerror = (e: any) => {
                 log.error('transport', 'WS error:', e.message || e);
-                reject(e);
+                if (!settled) {
+                    settled = true;
+                    reject(e instanceof Error ? e : new Error('WebSocket error'));
+                }
             };
 
             this.ws!.onclose = () => {
                 log.info('transport', 'WebSocket disconnected');
+                this.ws = null;
                 for (const [, p] of this.pendingRequests) {
                     p.reject(new Error('WebSocket closed'));
                 }
                 this.pendingRequests.clear();
+                if (!this.intentionalClose && this.credentials.email) {
+                    this.scheduleReconnect();
+                }
             };
         });
     }
 
+    private scheduleReconnect() {
+        if (this.reconnectTimer || this.intentionalClose) return;
+        // 1s, 2s, 4s … cap 30s
+        const delay = Math.min(30_000, 1000 * 2 ** Math.min(this.reconnectAttempt, 5));
+        this.reconnectAttempt += 1;
+        log.info('transport', `WS reconnect in ${delay}ms (attempt ${this.reconnectAttempt})`);
+        this.reconnectTimer = setTimeout(() => {
+            this.reconnectTimer = null;
+            void this.connect(this.lastSinceUID).catch((e) => {
+                log.warn('transport', `WS reconnect failed: ${e?.message || e}`);
+                this.scheduleReconnect();
+            });
+        }, delay);
+    }
+
     /** Disconnect WebSocket */
     disconnect() {
+        this.intentionalClose = true;
+        if (this.reconnectTimer) {
+            clearTimeout(this.reconnectTimer);
+            this.reconnectTimer = null;
+        }
         this.ws?.close();
         this.ws = null;
         for (const [, p] of this.pendingRequests) {

@@ -18,9 +18,17 @@ export abstract class AccountSecureJoin extends AccountGroups {
         return securejoinLib.parseSecureJoinURI(uri);
     }
 
-    generateSecureJoinURI(): string {
-        this.myInviteNumber = securejoinLib.randomToken(24);
-        this.myAuthToken = securejoinLib.randomToken(24);
+    /**
+     * Build (or reuse) this account's contact invite URI.
+     * Tokens are stable until `forceNew` so a shared QR stays valid across
+     * reloads and repeated "Show mine" opens.
+     */
+    generateSecureJoinURI(forceNew = false): string {
+        if (forceNew || !this.myInviteNumber || !this.myAuthToken) {
+            this.myInviteNumber = securejoinLib.randomToken(24);
+            this.myAuthToken = securejoinLib.randomToken(24);
+            this.schedulePersist();
+        }
         return securejoinLib.generateSecureJoinURI(this.ctx(), this.myInviteNumber, this.myAuthToken);
     }
 

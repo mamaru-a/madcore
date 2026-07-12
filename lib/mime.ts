@@ -202,13 +202,21 @@ export async function parseIncoming(raw: IncomingMessage, ctx: ParseContext): Pr
     // Skip our own messages
     if (from === ctx.email.toLowerCase()) return null;
 
-    // Import Autocrypt key if present
+    // Import Autocrypt key if present (alias IP-literal forms)
     const autocrypt = headers['autocrypt'];
     if (autocrypt) {
         const parsed = cryptoLib.parseAutocryptHeader(autocrypt);
-        if (parsed && !ctx.knownKeys.has(parsed.addr)) {
-            ctx.knownKeys.set(parsed.addr, parsed.armoredKey);
-            log.debug('mime', `Auto-imported key for ${parsed.addr}`);
+        if (parsed) {
+            const already =
+                ctx.knownKeys.has(parsed.addr) ||
+                // also treat alias forms as already imported
+                [...ctx.knownKeys.keys()].some(
+                    (k) => k.replace(/[\[\]]/g, '') === parsed.addr.replace(/[\[\]]/g, ''),
+                );
+            if (!already) {
+                cryptoLib.rememberPeerKey(ctx.knownKeys, parsed.addr, parsed.armoredKey);
+                log.debug('mime', `Auto-imported key for ${parsed.addr}`);
+            }
         }
     }
 
@@ -256,8 +264,8 @@ export async function parseIncoming(raw: IncomingMessage, ctx: ParseContext): Pr
             const innerAutocrypt = innerHeaders['autocrypt'];
             if (innerAutocrypt) {
                 const parsed = cryptoLib.parseAutocryptHeader(innerAutocrypt);
-                if (parsed && !ctx.knownKeys.has(parsed.addr)) {
-                    ctx.knownKeys.set(parsed.addr, parsed.armoredKey);
+                if (parsed) {
+                    cryptoLib.rememberPeerKey(ctx.knownKeys, parsed.addr, parsed.armoredKey);
                     log.debug('mime', `Imported key for ${parsed.addr} from encrypted headers`);
                 }
             }
@@ -266,8 +274,8 @@ export async function parseIncoming(raw: IncomingMessage, ctx: ParseContext): Pr
             const gossipHeader = innerHeaders['autocrypt-gossip'];
             if (gossipHeader) {
                 const parsed = cryptoLib.parseAutocryptHeader(gossipHeader);
-                if (parsed && !ctx.knownKeys.has(parsed.addr)) {
-                    ctx.knownKeys.set(parsed.addr, parsed.armoredKey);
+                if (parsed) {
+                    cryptoLib.rememberPeerKey(ctx.knownKeys, parsed.addr, parsed.armoredKey);
                     log.debug('mime', `Imported gossip key for ${parsed.addr}`);
                 }
             }

@@ -127,17 +127,29 @@ export function DeltaChatSDK(config: SDKConfig = {}): IDeltaChatManager {
             const existing = [...accounts.values()].find(
                 a => a.getCredentials().email.toLowerCase() === email.toLowerCase(),
             );
-            if (existing) return existing;
+            if (existing) {
+                // Keep caller password authoritative (don't leave a fire-and-forget load
+                // race that can wipe transport creds).
+                existing.setCredentials(email, password, serverUrl);
+                return existing;
+            }
 
             const id = generateAccountId();
             const accStore = storeForAccount(store, email);
             const acc = new DeltaChatAccount(accStore, id, email, password, serverUrl);
             accounts.set(id, acc);
+            // Sync restore path: await load then re-pin password (was race-prone fire-and-forget)
             void (async () => {
-                const ok = await acc.loadFromStore();
-                if (ok) log.info('sdk', `Restored account ${email} from store`);
-                else acc.schedulePersist();
-                await rememberIfIdb(store, { email, serverUrl, displayName: acc.getDisplayName() });
+                try {
+                    const ok = await acc.loadFromStore();
+                    acc.setCredentials(email, password, serverUrl);
+                    if (ok) log.info('sdk', `Restored account ${email} from store`);
+                    else acc.schedulePersist();
+                    await rememberIfIdb(store, { email, serverUrl, displayName: acc.getDisplayName() });
+                } catch (e: any) {
+                    log.warn('sdk', `addAccount background restore failed: ${e?.message || e}`);
+                    acc.setCredentials(email, password, serverUrl);
+                }
             })();
             return acc;
         },
@@ -166,6 +178,9 @@ export function DeltaChatSDK(config: SDKConfig = {}): IDeltaChatManager {
             );
             if (existing) {
                 await existing.loadFromStore();
+                // Always re-apply caller password — store snapshot may be stale/empty
+                // (loadFromStore used to overwrite vault creds and break send with 401).
+                existing.setCredentials(key, password, url);
                 return existing;
             }
 
@@ -174,9 +189,10 @@ export function DeltaChatSDK(config: SDKConfig = {}): IDeltaChatManager {
             const acc = new DeltaChatAccount(accStore, id, key, password, url);
             accounts.set(id, acc);
             const ok = await acc.loadFromStore();
+            // Always pin password from the restore caller (vault / dclogin).
+            // Snapshot may have empty or rotated credentials after partial persists.
+            acc.setCredentials(key, password, url);
             if (!ok) {
-                // No snapshot yet — keep credentials so the caller can connect / generate keys
-                acc.setCredentials(key, password, url);
                 acc.schedulePersist();
             }
             await rememberIfIdb(store, {

@@ -123,4 +123,47 @@ describe('account persistence', () => {
         expect(b.getDisplayName()).toBe('Eve E');
         expect(b.getFingerprint().length).toBeGreaterThan(8);
     });
+
+    it('dedupes bloated relays[] on load and saves a single primary', async () => {
+        const store = new MemoryStore();
+        const email = 'user@[172.104.241.158]';
+        const serverUrl = 'https://172.104.241.158';
+        const password = 'secret-pass';
+        // Simulate a corrupted snapshot with 32 identical primary relays
+        const bloated = Array.from({ length: 32 }, (_, i) => ({
+            id: `dup${i.toString(16).padStart(8, '0')}`,
+            serverUrl,
+            email,
+            password,
+        }));
+        await store.saveAccount({
+            email,
+            password,
+            serverUrl,
+            displayName: 'user',
+            fingerprint: 'ABC',
+            privateKeyArmored: '',
+            publicKeyArmored: '',
+            autocryptKeydata: '',
+            relays: bloated,
+        });
+
+        const a = new DeltaChatAccount(store, 'acc-bloat', email, password, serverUrl);
+        expect(await a.loadFromStore()).toBe(true);
+        expect(a.listRelays()).toHaveLength(1);
+        expect(a.getCredentials().email).toBe(email);
+        expect(a.getCredentials().password).toBe(password);
+
+        // Repeated setCredentials must not grow the list
+        for (let i = 0; i < 10; i++) {
+            a.setCredentials(email, password, serverUrl);
+        }
+        expect(a.listRelays()).toHaveLength(1);
+
+        await a.flushPersist();
+        const saved = await store.getAccountByEmail(email);
+        expect(saved?.relays?.length).toBe(1);
+        expect(saved?.relays?.[0].serverUrl).toBe(serverUrl);
+        expect(saved?.relays?.[0].password).toBe(password);
+    });
 });

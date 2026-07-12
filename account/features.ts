@@ -71,8 +71,12 @@ export abstract class AccountFeatures extends AccountInbox {
             account: {
                 ...account,
                 config: Object.fromEntries(this.configBag),
-                relays: [...this.relays.values()].map(r => ({
-                    id: r.id, serverUrl: r.serverUrl, email: r.email, password: r.password,
+                // One relay per serverUrl — never re-export bloated clones
+                relays: this.listRelays().map(r => ({
+                    id: r.id,
+                    serverUrl: r.serverUrl,
+                    email: r.email,
+                    password: r.password,
                 })),
             },
             contacts: await this.store.getAllContacts(),
@@ -108,7 +112,8 @@ export abstract class AccountFeatures extends AccountInbox {
         if (payload.config) {
             for (const [k, v] of Object.entries(payload.config)) this.configBag.set(k, v);
         }
-        // Restore credentials + keys
+        // Restore credentials + keys. Do NOT bulk-insert payload.relays here —
+        // that recreated 30+ duplicate primaries. loadFromStore dedupes.
         this.setCredentials(payload.account.email, payload.account.password, payload.account.serverUrl);
         if (payload.account.privateKeyArmored) {
             this.privateKey = await openpgp.readPrivateKey({ armoredKey: payload.account.privateKeyArmored });
@@ -119,12 +124,14 @@ export abstract class AccountFeatures extends AccountInbox {
             this.autocryptKeydata = cryptoLib.extractAutocryptKeydata(payload.account.publicKeyArmored);
         }
         this.displayName = payload.account.displayName || '';
-        if (payload.account.relays) {
-            for (const r of payload.account.relays) {
-                this.relays.set(r.id, { ...r });
-            }
-        }
         await this.loadFromStore();
+        // Pin backup password again after load (snapshot may have been empty/stale)
+        this.setCredentials(
+            payload.account.email,
+            payload.account.password,
+            payload.account.serverUrl,
+        );
+        await this.flushPersist();
         log.info('sdk', `Imported backup for ${payload.account.email}`);
     }
 
@@ -156,17 +163,56 @@ export abstract class AccountFeatures extends AccountInbox {
         return [...this.watchedMailboxes];
     }
 
-    /** Fetch new messages from all watched mailboxes */
+    /**
+     * Fetch new messages from all watched mailboxes and process them into the store.
+     * list_messages only returns summaries — we must fetch bodies and run processIncomingRaw.
+     */
     async backgroundFetch(sinceUID = 0): Promise<number> {
         let total = 0;
+        const since = sinceUID > 0 ? sinceUID : this.lastSeenUid;
         for (const mailbox of this.watchedMailboxes) {
             try {
-                const msgs = await this.transport.fetchMessages(sinceUID, mailbox);
-                total += Array.isArray(msgs) ? msgs.length : 0;
+                const listed = await this.transport.fetchMessages(since, mailbox);
+                const items = Array.isArray(listed) ? listed : [];
+                for (const item of items) {
+                    const uid =
+                        item && typeof item === 'object' && 'uid' in item
+                            ? Number((item as { uid: number }).uid)
+                            : NaN;
+                    if (!Number.isFinite(uid) || uid <= 0) continue;
+                    if (this.seenUIDs.has(uid)) continue;
+                    try {
+                        let body =
+                            item && typeof item === 'object' && 'body' in item
+                                ? String((item as { body?: string }).body || '')
+                                : '';
+                        let envelope =
+                            item && typeof item === 'object' && 'envelope' in item
+                                ? (item as { envelope?: unknown }).envelope
+                                : undefined;
+                        if (!body) {
+                            const detail = await this.transport.fetchMessage(uid, mailbox);
+                            body = detail?.body || '';
+                            envelope = detail?.envelope ?? envelope;
+                        }
+                        if (!body) {
+                            log.warn('sdk', `backgroundFetch uid ${uid}: empty body`);
+                            continue;
+                        }
+                        const parsed = await this.processIncomingRaw({ uid, body, envelope });
+                        if (parsed) total += 1;
+                    } catch (e: any) {
+                        log.warn('sdk', `backgroundFetch process uid ${uid}: ${e.message}`);
+                    }
+                }
             } catch (e: any) {
                 this.lastTransportError = e.message;
                 log.warn('sdk', `backgroundFetch ${mailbox}: ${e.message}`);
             }
+        }
+        if (total > 0) {
+            this.schedulePersist();
+            log.info('sdk', `backgroundFetch processed ${total} message(s)`);
         }
         return total;
     }

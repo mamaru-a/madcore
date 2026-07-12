@@ -24,6 +24,24 @@ export abstract class AccountInbox extends AccountProfile {
             // allow re-process with uid=0 for tests
             if (raw.uid !== 0) return null;
         }
+
+        for (const h of this.rawHandlers) h(raw);
+
+        let parsed: ParsedMessage | null;
+        try {
+            parsed = await mimeLib.parseIncoming(raw, {
+                email: this.credentials.email,
+                privateKey: this.privateKey,
+                knownKeys: this.knownKeys,
+                peerAvatars: this.peerAvatars,
+            });
+        } catch (e: any) {
+            // Do NOT mark seen — allow backgroundFetch/push to retry
+            log.warn('sdk', `parseIncoming failed uid=${raw.uid}: ${e?.message || e}`);
+            throw e;
+        }
+
+        // Mark after parse completes (null = deliberate skip e.g. own mail)
         if (raw.uid != null && raw.uid !== 0) {
             this.seenUIDs.add(raw.uid);
             if (raw.uid > this.lastSeenUid) {
@@ -31,15 +49,6 @@ export abstract class AccountInbox extends AccountProfile {
                 this.schedulePersist();
             }
         }
-
-        for (const h of this.rawHandlers) h(raw);
-
-        const parsed = await mimeLib.parseIncoming(raw, {
-            email: this.credentials.email,
-            privateKey: this.privateKey,
-            knownKeys: this.knownKeys,
-            peerAvatars: this.peerAvatars,
-        });
 
         if (parsed) {
             // Drop messages from blocked senders (except our own echoes)

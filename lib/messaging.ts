@@ -34,43 +34,46 @@ export async function sendTextMessage(ctx: SDKContext, toEmail: string, text: st
     const msgId = ctx.generateMsgId();
     const now = new Date().toUTCString();
     const fromHeader = buildFromHeader(ctx);
-    const peerKey = ctx.knownKeys.get(toEmail.toLowerCase());
+    const peerKey =
+        ctx.knownKeys.get(toEmail.toLowerCase()) ||
+        // IP-literal alias: user@1.2.3.4 ↔ user@[1.2.3.4]
+        ctx.knownKeys.get(toEmail.toLowerCase().replace(/\[|\]/g, '')) ||
+        (() => {
+            const m = toEmail.toLowerCase().match(/^([^@]+)@(\d{1,3}(?:\.\d{1,3}){3})$/);
+            return m ? ctx.knownKeys.get(`${m[1]}@[${m[2]}]`) : undefined;
+        })();
 
-    if (peerKey && ctx.privateKey && ctx.publicKey) {
-        // encrypt() wraps plaintext for Autocrypt-style text payloads (not raw MIME)
-        const armored = await ctx.encrypt(text, peerKey, {
-            from: ctx.credentials.email,
-            to: toEmail,
-        });
-        const rawEmail = buildPgpMimeEnvelope({
-            fromHeader,
-            toHeader: bracketEmail(toEmail),
-            msgId,
-            date: now,
-            outerHeaders: [dispositionNotificationHeader(ctx)],
-            autocryptHeader: ctx.buildAutocryptHeader(),
-            armored,
-        });
-        await ctx.sendRaw(ctx.credentials.email, [toEmail], rawEmail);
-        log.info('messaging', `Sent encrypted message to ${toEmail} [${msgId}]`);
-        return msgId;
+    if (!ctx.privateKey || !ctx.publicKey) {
+        throw new Error(
+            'No local encryption keys. Finish profile setup so Madweb can generate a PGP keypair.',
+        );
     }
 
-    const rawEmail = [
+    if (!peerKey) {
+        // Madmail (and chatmail) reject unencrypted mail. The only supported
+        // first-contact path is SecureJoin / Contact QR — not bare email.
+        throw new Error(
+            `No encryption key for ${toEmail}. Add them with Contact QR (SecureJoin) first, ` +
+            `or wait until they message you (Autocrypt). Plaintext mail is not accepted by the relay.`,
+        );
+    }
+
+    // encrypt() wraps plaintext for Autocrypt-style text payloads (not raw MIME)
+    const armored = await ctx.encrypt(text, peerKey, {
+        from: ctx.credentials.email,
+        to: toEmail,
+    });
+    const rawEmail = buildPgpMimeEnvelope({
         fromHeader,
-        `To: ${bracketEmail(toEmail)}`,
-        `Date: ${now}`,
-        `Message-ID: ${msgId}`,
-        `Subject: [...]`,
-        `Chat-Version: 1.0`,
-        ctx.buildAutocryptHeader(),
-        `Content-Type: text/plain; charset=utf-8`,
-        `MIME-Version: 1.0`,
-        '',
-        text,
-    ].join('\r\n');
+        toHeader: bracketEmail(toEmail),
+        msgId,
+        date: now,
+        outerHeaders: [dispositionNotificationHeader(ctx)],
+        autocryptHeader: ctx.buildAutocryptHeader(),
+        armored,
+    });
     await ctx.sendRaw(ctx.credentials.email, [toEmail], rawEmail);
-    log.info('messaging', `Sent message to ${toEmail} [${msgId}]`);
+    log.info('messaging', `Sent encrypted message to ${toEmail} [${msgId}]`);
     return msgId;
 }
 

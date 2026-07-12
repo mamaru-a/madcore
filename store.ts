@@ -131,6 +131,12 @@ export interface StoredAccount {
     groups?: StoredGroup[];
     /** Highest processed mailbox UID (for reconnect sync) */
     lastSeenUid?: number;
+    /**
+     * Active SecureJoin inviter tokens. Must survive reload so peers who scanned
+     * our QR can complete the handshake while we are online later.
+     */
+    secureJoinInviteNumber?: string;
+    secureJoinAuthToken?: string;
 }
 
 /** Webxdc status updates keyed by instance message id */
