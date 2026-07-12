@@ -105,6 +105,9 @@ export abstract class AccountSecureJoin extends AccountGroups {
                         this.knownKeys.get(peerEmail) ||
                         this.knownKeys.get(peerEmail.replace(/@\[([^\]]+)\]/g, '@$1')) ||
                         '';
+                    if (peerKey) {
+                        await this.rememberPeerKey(peerEmail, peerKey);
+                    }
                     let contactId = this.emailToContactId.get(peerEmail);
                     if (!contactId) {
                         contactId = generateAccountId();
@@ -193,10 +196,16 @@ export abstract class AccountSecureJoin extends AccountGroups {
 
         // After SecureJoin, persist the peer's contact (display name + public key)
         const peerEmail = result.peerEmail.toLowerCase();
-        const peerKey = this.knownKeys.get(peerEmail);
+        const peerKey = this.knownKeys.get(peerEmail)
+            || this.knownKeys.get(peerEmail.replace(/@\[([^\]]+)\]/g, '@$1'));
         // Extract display name from the invite URI
         const parsed = this.parseSecureJoinURI(uri);
         const peerName = parsed.name || peerEmail.split('@')[0];
+
+        // Persist peer key into active store (Memory / IndexedDB)
+        if (peerKey) {
+            await this.rememberPeerKey(peerEmail, peerKey);
+        }
 
         // Create contact with random ID (or update existing)
         let contactId = this.emailToContactId.get(peerEmail);

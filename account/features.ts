@@ -478,6 +478,7 @@ export abstract class AccountFeatures extends AccountInbox {
             (type === 'image' ? '🖼' : opts.media?.filename || 'Device message');
         chat.lastMessage = preview.substring(0, 100);
         chat.lastMessageId = msgId;
+        // Device msgs use Date.now() ms; keep lastMessageTime in ms for chatlist
         chat.lastMessageTime = timestamp > 1e12 ? timestamp : timestamp * 1000;
         chat.unreadCount = (chat.unreadCount || 0) + 1;
         await this.store.saveChat(chat);

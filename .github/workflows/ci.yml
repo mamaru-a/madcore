@@ -1,4 +1,4 @@
-# Continuous integration — typecheck, unit tests, build
+# Continuous integration — unit tests + live SecureJoin (madmail binary + core binary)
 name: CI
 
 on:
@@ -14,12 +14,14 @@ concurrency:
 
 permissions:
   contents: read
+  # Pull public ghcr.io/themadorg/madmail image to extract the madmail binary
+  packages: read
 
 jobs:
-  test:
-    name: Test & build
+  unit:
+    name: Unit & build
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 10
 
     steps:
       - name: Checkout
@@ -37,7 +39,7 @@ jobs:
         run: bunx tsc --noEmit
 
       - name: Unit tests (rpc)
-        run: bun run test
+        run: bun run test:rpc
 
       - name: Build
         run: bun run build
@@ -52,3 +54,51 @@ jobs:
             if (typeof m.DeltaChatSDK !== 'function') throw new Error('DeltaChatSDK missing');
             console.log('sdk export ok');
           })"
+
+  # Live SecureJoin matrix against real madmail + official deltachat-rpc-server.
+  # No Docker *service* — we extract/run the madmail binary and the core binary.
+  live:
+    name: Live SecureJoin (madmail + core binaries)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Install system tools
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq curl python3 ca-certificates
+
+      # Full binary pipeline:
+      #   1. download deltachat-rpc-server → .tools/
+      #   2. download/extract madmail binary → .tools/
+      #   3. run madmail (high ports, webimap+websmtp)
+      #   4. build + unit + SecureJoin (core↔core, madcore, cross)
+      #   5. stop madmail
+      - name: make test-ci
+        env:
+          NODE_TLS_REJECT_UNAUTHORIZED: "0"
+          MADMAIL_URL: "https://127.0.0.1:8443"
+          # Prefer image that matches local Docker tests (extracted to a plain binary)
+          MADMAIL_IMAGE: "ghcr.io/themadorg/madmail:latest"
+        run: make test-ci
+
+      - name: Upload madmail log on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: madmail-binary-log
+          path: |
+            .madmail-binary/madmail.log
+            .madmail-binary/etc/madmail.conf
+          if-no-files-found: ignore

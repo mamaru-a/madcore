@@ -316,3 +316,225 @@ export async function coreGetSecureJoinQr(rpc: CoreRpc, accountId: number): Prom
 export async function coreSecureJoin(rpc: CoreRpc, accountId: number, qr: string): Promise<number> {
   return (await rpc.call("secure_join", accountId, qr)) as number;
 }
+
+/** Core message object returned by `get_message` (subset we assert on). */
+export type CoreMessage = {
+  id: number;
+  chatId: number;
+  text?: string;
+  subject?: string;
+  showPadlock?: boolean;
+  viewType?: string;
+  fromId?: number;
+  isInfo?: boolean;
+  state?: string | number;
+  [key: string]: unknown;
+};
+
+/** Send a plain-text message into a core chat. Returns the new local msg id. */
+export async function coreSendText(
+  rpc: CoreRpc,
+  accountId: number,
+  chatId: number,
+  text: string,
+): Promise<number> {
+  return (await rpc.call("misc_send_text_message", accountId, chatId, text)) as number;
+}
+
+/** Load a single message from core's local DB (decrypted body is in `text`). */
+export async function coreGetMessage(
+  rpc: CoreRpc,
+  accountId: number,
+  msgId: number,
+): Promise<CoreMessage> {
+  return (await rpc.call("get_message", accountId, msgId)) as CoreMessage;
+}
+
+/**
+ * Wait until core receives an IncomingMsg whose decrypted `text` equals
+ * `wantText` (or matches `wantText` predicate). Returns the stored message.
+ *
+ * Core only keeps decrypted content in its SQLite DB — `text` is plaintext
+ * after Autocrypt/PGP; `showPadlock` is true when encryption was verified.
+ */
+export async function coreWaitForTextMessage(
+  rpc: CoreRpc,
+  accountId: number,
+  wantText: string | ((text: string) => boolean),
+  timeoutMs = 60_000,
+): Promise<CoreMessage> {
+  const match =
+    typeof wantText === "function"
+      ? wantText
+      : (t: string) => t === wantText || t.includes(wantText);
+  const deadline = Date.now() + timeoutMs;
+  const seen = new Set<number>();
+
+  while (Date.now() < deadline) {
+    // Drain events; also poll open chats so we do not miss messages if the
+    // IncomingMsg event arrived before the waiter started.
+    try {
+      const remaining = Math.max(50, Math.min(2000, deadline - Date.now()));
+      const ev = await rpc.nextEvent(accountId, remaining);
+      if (ev.kind === "IncomingMsg" && typeof ev.msgId === "number") {
+        seen.add(ev.msgId as number);
+        const msg = await coreGetMessage(rpc, accountId, ev.msgId as number);
+        if (msg && typeof msg.text === "string" && match(msg.text) && !msg.isInfo) {
+          return msg;
+        }
+      }
+    } catch {
+      /* nextEvent timeout — fall through to poll */
+    }
+
+    try {
+      const chats = (await rpc.call("get_chatlist_entries", accountId, 0, null, null)) as number[];
+      for (const chatId of chats || []) {
+        let ids: number[] = [];
+        try {
+          ids = (await rpc.call("get_message_ids", accountId, chatId, false, false)) as number[];
+        } catch {
+          continue;
+        }
+        for (const mid of ids || []) {
+          if (seen.has(mid)) continue;
+          seen.add(mid);
+          try {
+            const msg = await coreGetMessage(rpc, accountId, mid);
+            if (msg && typeof msg.text === "string" && match(msg.text) && !msg.isInfo) {
+              return msg;
+            }
+          } catch {
+            /* */
+          }
+        }
+      }
+    } catch {
+      /* */
+    }
+  }
+  throw new Error(
+    `coreWaitForTextMessage timeout (${timeoutMs}ms) want=${
+      typeof wantText === "string" ? wantText : "<predicate>"
+    }`,
+  );
+}
+
+/** Normalize for comparing chatmail IP-literal addresses. */
+function normAddr(email: string): string {
+  return (email || "")
+    .trim()
+    .toLowerCase()
+    .replace(/@\[([^\]]+)\]/g, "@$1");
+}
+
+/** All forms of an address worth trying against core's contact index. */
+function addrVariants(email: string): string[] {
+  const raw = (email || "").trim();
+  const bare = normAddr(raw);
+  const out = new Set<string>();
+  if (raw) out.add(raw);
+  if (raw) out.add(raw.toLowerCase());
+  if (bare) out.add(bare);
+  if (bare.includes("@")) {
+    const [local, host] = bare.split("@");
+    if (host && /^\d{1,3}(\.\d{1,3}){3}$/.test(host)) {
+      out.add(`${local}@[${host}]`);
+    }
+  }
+  return [...out];
+}
+
+/** Resolve contact id for an email address (core lookup + contact list scan). */
+export async function coreLookupContactId(
+  rpc: CoreRpc,
+  accountId: number,
+  email: string,
+): Promise<number | null> {
+  for (const e of addrVariants(email)) {
+    try {
+      const id = (await rpc.call("lookup_contact_id_by_addr", accountId, e)) as number;
+      if (id && id > 0) return id;
+    } catch {
+      /* */
+    }
+  }
+  // Fallback: scan contact list (cross SecureJoin can race lookup indexes)
+  try {
+    const list = (await rpc.call("get_contacts", accountId, 0, null)) as Array<
+      number | { id?: number; address?: string }
+    >;
+    const want = new Set(addrVariants(email).map(normAddr));
+    for (const c of list || []) {
+      if (typeof c === "number") {
+        try {
+          const info = (await rpc.call("get_contact", accountId, c)) as { id?: number; address?: string };
+          if (info?.address && want.has(normAddr(info.address))) return info.id || c;
+        } catch {
+          /* */
+        }
+      } else if (c?.address && want.has(normAddr(c.address))) {
+        return c.id || null;
+      }
+    }
+  } catch {
+    /* */
+  }
+  return null;
+}
+
+/**
+ * Get or create the 1:1 chat id for a peer email.
+ * Retries briefly — inviter-side contact rows can lag a tick after SecureJoin.
+ */
+export async function coreChatIdForEmail(
+  rpc: CoreRpc,
+  accountId: number,
+  peerEmail: string,
+  opts: { timeoutMs?: number } = {},
+): Promise<number> {
+  const timeoutMs = opts.timeoutMs ?? 15_000;
+  const deadline = Date.now() + timeoutMs;
+  let lastErr: Error | null = null;
+
+  while (Date.now() < deadline) {
+    try {
+      const contactId = await coreLookupContactId(rpc, accountId, peerEmail);
+      if (contactId) {
+        try {
+          const existing = (await rpc.call(
+            "get_chat_id_by_contact_id",
+            accountId,
+            contactId,
+          )) as number;
+          if (existing && existing > 0) return existing;
+        } catch {
+          /* */
+        }
+        return (await rpc.call("create_chat_by_contact_id", accountId, contactId)) as number;
+      }
+
+      // Fallback: scan chatlist for a 1:1 chat whose peer address matches
+      const chats = (await rpc.call("get_chatlist_entries", accountId, 0, null, null)) as number[];
+      const want = new Set(addrVariants(peerEmail).map(normAddr));
+      for (const chatId of chats || []) {
+        try {
+          const members = (await rpc.call("get_chat_contacts", accountId, chatId)) as number[];
+          for (const cid of members || []) {
+            // skip self (id 1 is typically DC_CONTACT_ID_SELF)
+            if (cid === 1) continue;
+            const info = (await rpc.call("get_contact", accountId, cid)) as { address?: string };
+            if (info?.address && want.has(normAddr(info.address))) return chatId;
+          }
+        } catch {
+          /* */
+        }
+      }
+      lastErr = new Error(`coreChatIdForEmail: no contact for ${peerEmail}`);
+    } catch (e: any) {
+      lastErr = e instanceof Error ? e : new Error(String(e));
+    }
+    await new Promise((r) => setTimeout(r, 400));
+  }
+  throw lastErr || new Error(`coreChatIdForEmail: no contact for ${peerEmail}`);
+}

@@ -48,6 +48,10 @@ export abstract class AccountInbox extends AccountProfile {
             privateKey: this.privateKey,
             knownKeys: this.knownKeys,
             peerAvatars: this.peerAvatars,
+            // Peer keys land in the active store (MemoryStore or IndexedDB)
+            onPeerKey: (email, armored) => {
+                void this.rememberPeerKey(email, armored);
+            },
         });
 
         if (parsed) {
@@ -242,7 +246,8 @@ export abstract class AccountInbox extends AccountProfile {
                     const last = msgs[msgs.length - 1];
                     chat.lastMessage = (last.text || '').substring(0, 100);
                     chat.lastMessageId = last.id;
-                    chat.lastMessageTime = last.timestamp > 1e12 ? last.timestamp : last.timestamp * 1000;
+                    chat.lastMessageTime =
+                        last.timestamp > 1e12 ? last.timestamp : last.timestamp * 1000;
                 } else {
                     chat.lastMessage = undefined;
                     chat.lastMessageId = undefined;
@@ -595,8 +600,9 @@ export abstract class AccountInbox extends AccountProfile {
         if (chatObj) {
             chatObj.lastMessage = (parsed.text || '').substring(0, 100);
             chatObj.lastMessageId = msg.id;
-            // Always store ms so chatlist sort matches desktop (newest first)
-            chatObj.lastMessageTime = msg.timestamp > 1e12 ? msg.timestamp : msg.timestamp * 1000;
+            // Always store ms so chatlist lastUpdated (ms) + sort match desktop
+            chatObj.lastMessageTime =
+                msg.timestamp > 1e12 ? msg.timestamp : msg.timestamp * 1000;
             if (!isSelf) {
                 chatObj.unreadCount++;
             }
@@ -615,6 +621,20 @@ export abstract class AccountInbox extends AccountProfile {
         await this.store.saveChat(chat);
 
         // Mark all messages in this chat as seen + send wire read receipts
+        // (never MDN device/system/local msgs — core also skips those)
+        if (chatId === 'device-chat') {
+            const msgs = await this.store.getChatMessages(chatId, 1000, 0);
+            const now = Date.now();
+            for (const msg of msgs) {
+                if (msg.direction === 'incoming' && msg.state !== 'seen') {
+                    msg.state = 'seen';
+                    msg.seenAt = now;
+                    await this.store.saveMessage(msg);
+                }
+            }
+            return;
+        }
+
         const msgs = await this.store.getChatMessages(chatId, 1000, 0);
         const now = Date.now();
         for (const msg of msgs) {
@@ -624,7 +644,7 @@ export abstract class AccountInbox extends AccountProfile {
                 await this.store.saveMessage(msg);
                 // Send MDN to the sender (core-compatible multipart/report)
                 try {
-                    if (msg.from) {
+                    if (messagingLib.shouldSendReadReceipt(msg)) {
                         await messagingLib.sendReadReceipt(this.ctx(), msg.from, msg.id);
                     }
                 } catch (e: any) {
@@ -652,9 +672,10 @@ export abstract class AccountInbox extends AccountProfile {
         await this.store.saveMessage(msg);
 
         // Wire read receipt when we first mark an incoming message as seen
+        // Skip device/system/local — never POST MDN to "device" or @local ids
         if (wasUnseen && msg.direction === 'incoming' && !byEmail) {
             try {
-                if (msg.from) {
+                if (messagingLib.shouldSendReadReceipt(msg)) {
                     await messagingLib.sendReadReceipt(this.ctx(), msg.from, msg.id);
                 }
             } catch (e: any) {

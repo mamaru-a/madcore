@@ -7,7 +7,7 @@ import { log, addLogSink } from '../lib/logger.js';
 import { IndexedDBStore, type IDeltaChatStore, type StoredChat, type StoredMessage, type StoredContact, type StoredAccount, type StoredGroup } from '../store.js';
 import { Transport } from '../lib/transport.js';
 import * as cryptoLib from '../lib/crypto.js';
-import { setKnownKey } from '../lib/crypto.js';
+import { setKnownKey, emailsEqual, headerEmail } from '../lib/crypto.js';
 import { foldBase64 } from '../lib/mime-build.js';
 import type { WebxdcStatusUpdate } from '../lib/webxdc.js';
 import type { LocationStreamState, LocationPoint } from '../lib/location.js';
@@ -420,25 +420,85 @@ export abstract class AccountBase {
         };
         await this.store.saveAccount(acct);
 
-        // Save known keys to contacts
+        // Save peer public keys → contacts (one row per mailbox, not per addr variant)
+        const byCanon = new Map<string, { email: string; armored: string }>();
         for (const [email, armored] of this.knownKeys) {
-            if (email === this.credentials.email.toLowerCase()) continue;
-            let contactId = this.emailToContactId.get(email);
-            let contact = contactId ? this.contacts.get(contactId) : undefined;
-            if (!contact) {
-                contactId = generateAccountId();
-                contact = { id: contactId, email, name: email.split('@')[0], verified: false };
-                this.contacts.set(contactId, contact);
-                this.emailToContactId.set(email, contactId);
+            if (emailsEqual(email, this.credentials.email)) continue;
+            if (!armored) continue;
+            const canon = headerEmail(email);
+            const prev = byCanon.get(canon);
+            // Prefer domain-literal form when both bare + bracketed exist
+            if (!prev || email.includes('[')) {
+                byCanon.set(canon, { email: email.toLowerCase(), armored });
             }
-            contact.publicKeyArmored = armored;
-            const avatar = this.peerAvatars.get(email);
-            if (avatar) contact.avatar = avatar;
-            await this.store.saveContact(contact);
+        }
+        for (const { email, armored } of byCanon.values()) {
+            await this.upsertPeerContactKey(email, armored);
         }
     }
 
-    /** Generate PGP keypair */
+    /**
+     * Remember a peer public key in RAM **and** the active store backend
+     * (MemoryStore or IndexedDB — same API either way).
+     *
+     * Call this for Autocrypt / Gossip / SecureJoin / manual import so keys
+     * survive reloads when using IndexedDB, and stay consistent in MemoryStore.
+     */
+    async rememberPeerKey(email: string, armoredKey: string): Promise<void> {
+        if (!email || !armoredKey) return;
+        // Self key belongs on the account row, not as a peer contact
+        if (emailsEqual(email, this.credentials.email)) {
+            setKnownKey(this.knownKeys, this.credentials.email, armoredKey);
+            this.schedulePersist();
+            return;
+        }
+        setKnownKey(this.knownKeys, email, armoredKey);
+        await this.upsertPeerContactKey(email.toLowerCase(), armoredKey);
+        // Debounced full snapshot (self private/public + config + all contacts)
+        this.schedulePersist();
+    }
+
+    /** Write/update one contact's publicKeyArmored into the store. */
+    private async upsertPeerContactKey(email: string, armoredKey: string): Promise<void> {
+        const lower = email.toLowerCase();
+        const bare = headerEmail(lower);
+        let contactId =
+            this.emailToContactId.get(lower) ||
+            this.emailToContactId.get(bare) ||
+            undefined;
+        // Scan registry if map missed a variant
+        if (!contactId) {
+            for (const [em, id] of this.emailToContactId) {
+                if (emailsEqual(em, lower)) {
+                    contactId = id;
+                    break;
+                }
+            }
+        }
+        let contact = contactId ? this.contacts.get(contactId) : undefined;
+        if (!contact) {
+            contactId = generateAccountId();
+            contact = {
+                id: contactId,
+                email: lower,
+                name: lower.split('@')[0] || lower,
+                verified: false,
+                publicKeyArmored: armoredKey,
+            };
+            this.contacts.set(contactId, contact);
+        } else {
+            contact.publicKeyArmored = armoredKey;
+            // Keep a single canonical email on the contact row
+            if (!contact.email) contact.email = lower;
+        }
+        this.emailToContactId.set(lower, contactId!);
+        this.emailToContactId.set(bare, contactId!);
+        const avatar = this.peerAvatars.get(lower) || this.peerAvatars.get(bare);
+        if (avatar) contact.avatar = avatar;
+        await this.store.saveContact(contact);
+    }
+
+    /** Generate PGP keypair and flush self keys to the active store immediately. */
     async generateKeys(name?: string): Promise<void> {
         this.displayName = name || '';
         const keys = await cryptoLib.generateKeys(this.credentials.email, name);
@@ -452,7 +512,8 @@ export abstract class AccountBase {
         for (const t of this.transports.values()) {
             t.configure(this.serverUrl, this.credentials);
         }
-        this.schedulePersist();
+        // Immediate write so self keys exist in Memory/IDB before first send/SJ
+        await this.flushPersist();
         log.info('sdk', `Keys generated. Fingerprint: ${this.fingerprint.substring(0, 16)}...`);
     }
 
@@ -699,9 +760,9 @@ export abstract class AccountBase {
     getKnownKeys(): Map<string, string> { return this.knownKeys; }
     getPublicKeyArmored(): string | null { return this.publicKey ? this.publicKey.armor() : null; }
 
+    /** Import a peer public key into RAM + the active store (Memory or IndexedDB). */
     importKey(email: string, armoredKey: string) {
-        setKnownKey(this.knownKeys, email, armoredKey);
-        this.schedulePersist();
+        void this.rememberPeerKey(email, armoredKey);
     }
 
     /** Get the full status of this account including all relay connection states */

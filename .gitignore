@@ -28,5 +28,6 @@ package-lock.json
 yarn.lock
 pnpm-lock.yaml
 .madmail-docker/
+.madmail-binary/
 .venv-sj/
 .tools/

@@ -150,9 +150,38 @@ function colorForId(id: number | string): string {
     return `hsl(${Math.abs(h) % 360} 45% 45%)`;
 }
 
-function tsSec(ms?: number): number {
-    if (!ms) return Math.floor(Date.now() / 1000);
-    return ms > 1e12 ? Math.floor(ms / 1000) : Math.floor(ms);
+/**
+ * Delta Chat JSON-RPC timestamp units (match real core):
+ * - Message.timestamp / sortTimestamp / receivedTimestamp / dayMarker → **unix seconds**
+ * - ChatListItem.lastUpdated → **unix milliseconds**
+ *
+ * Madcore store uses **milliseconds** (Date.now / Date.parse). These helpers
+ * tolerate legacy rows that accidentally stored seconds.
+ */
+/** True for unix-ms (post ~2001-09); seconds stay below this until year ~33658. */
+const TS_MS_THRESHOLD = 1e12;
+
+/** Normalize any store timestamp to unix **milliseconds**. */
+function tsMs(t?: number | null): number {
+    if (t == null || !Number.isFinite(Number(t)) || Number(t) <= 0) {
+        return Date.now();
+    }
+    const n = Number(t);
+    return n > TS_MS_THRESHOLD ? Math.floor(n) : Math.floor(n * 1000);
+}
+
+/** Normalize any store timestamp to unix **seconds** (RPC Message / day markers). */
+function tsSec(t?: number | null): number {
+    if (t == null || !Number.isFinite(Number(t)) || Number(t) <= 0) {
+        return Math.floor(Date.now() / 1000);
+    }
+    const n = Number(t);
+    return n > TS_MS_THRESHOLD ? Math.floor(n / 1000) : Math.floor(n);
+}
+
+/** Seconds to add to UTC to get local time (core `gm2local_offset`). */
+function gm2localOffsetSec(): number {
+    return -new Date().getTimezoneOffset() * 60;
 }
 
 function normalizeServerUrl(input: string, fallback: string): string {
@@ -1717,7 +1746,7 @@ export class DeltaChatJsonRpc {
             if (msgs.length) lastMsg = msgs[msgs.length - 1];
         }
         if (lastMsg) {
-            const t = lastMsg.timestamp > 1e12 ? lastMsg.timestamp : lastMsg.timestamp * 1000;
+            const t = tsMs(lastMsg.timestamp);
             const text = (lastMsg.text || '').substring(0, 100);
             if (
                 chat.lastMessageId !== lastMsg.id ||
@@ -1733,9 +1762,9 @@ export class DeltaChatJsonRpc {
                     /* ignore */
                 }
             }
-        } else if (chat.lastMessageTime && chat.lastMessageTime < 1e12) {
+        } else if (chat.lastMessageTime && chat.lastMessageTime < TS_MS_THRESHOLD) {
             // Legacy seconds → ms
-            chat.lastMessageTime = chat.lastMessageTime * 1000;
+            chat.lastMessageTime = tsMs(chat.lastMessageTime);
             try {
                 await slot.account.store.saveChat(chat);
             } catch {
@@ -1849,11 +1878,14 @@ export class DeltaChatJsonRpc {
             summaryStatus = DC_STATE_IN_FRESH;
         }
 
-        const lastUpdatedMs = chat?.lastMessageTime
-            ? chat.lastMessageTime > 1e12
-                ? chat.lastMessageTime
-                : chat.lastMessageTime * 1000
-            : null;
+        // Core: last_updated = last_message.get_timestamp() * 1000 (ms)
+        // Prefer message timestamp; fall back to chat preview field.
+        let lastUpdated: number | null = null;
+        if (lastMsg?.timestamp) {
+            lastUpdated = tsMs(lastMsg.timestamp);
+        } else if (chat?.lastMessageTime) {
+            lastUpdated = tsMs(chat.lastMessageTime);
+        }
         const isGroup = basic.chatType === 'Group' || basic.chatType === 'Broadcast';
 
         // Flat fields — same as desktop core / mock runtime ChatListItem
@@ -1864,7 +1896,7 @@ export class DeltaChatJsonRpc {
             avatarPath: basic.profileImage ?? null,
             color: basic.color,
             chatType: basic.chatType,
-            lastUpdated: lastUpdatedMs,
+            lastUpdated,
             summaryText1,
             summaryText2,
             summaryStatus,
@@ -1951,18 +1983,25 @@ export class DeltaChatJsonRpc {
         if (!key) return [];
         const msgs = await slot.account.getChatMessages(key, 500, 0);
         // oldest → newest (desktop chat transcript order); normalize sec/ms
-        const toMs = (t: number) => (t > 1e12 ? t : t * 1000);
-        const sorted = [...msgs].sort((a, b) => toMs(a.timestamp) - toMs(b.timestamp));
+        const sorted = [...msgs].sort((a, b) => tsMs(a.timestamp) - tsMs(b.timestamp));
         const result: Array<{ kind: string; msg_id?: number; timestamp?: number }> = [];
-        let lastDay = '';
+        // Core chat.rs day markers: local midnight as unix **seconds**
+        // (JSON-RPC type comment says ms but real core + desktop UI use seconds / moment.unix)
+        let lastDay = 0;
+        const cnvToLocal = gm2localOffsetSec();
+        const secsInDay = 86400;
         for (const m of sorted) {
             if (m.type === 'reaction' || m.type === 'delete') continue;
             if (addDaymarker) {
-                const d = new Date(toMs(m.timestamp));
-                const day = `${d.getFullYear()}-${d.getMonth()}-${d.getDate()}`;
-                if (day !== lastDay) {
-                    lastDay = day;
-                    result.push({ kind: 'dayMarker', timestamp: tsSec(m.timestamp) });
+                const ts = tsSec(m.timestamp);
+                const currLocal = ts + cnvToLocal;
+                const currDay = Math.floor(currLocal / secsInDay);
+                if (currDay !== lastDay) {
+                    lastDay = currDay;
+                    result.push({
+                        kind: 'dayMarker',
+                        timestamp: currDay * secsInDay - cnvToLocal,
+                    });
                 }
             }
             result.push({ kind: 'message', msg_id: slot.maps.msgId(m.id) });
@@ -2076,14 +2115,34 @@ export class DeltaChatJsonRpc {
             const msg = await slot.account.store.getMessage(key);
             if (!msg) continue;
             const chat = await slot.account.getChat(msg.chatId);
+            const basic = await this.basicChat(slot, slot.maps.chatId(msg.chatId));
+            const contact =
+                msg.direction === 'outgoing'
+                    ? null
+                    : slot.account.findContactByEmail(msg.from);
+            const authorName =
+                msg.direction === 'outgoing'
+                    ? 'Me'
+                    : contact?.name || chat?.name || msg.from.split('@')[0];
+            const authorId =
+                msg.direction === 'outgoing'
+                    ? SELF_CONTACT_ID
+                    : slot.maps.contactId(contact?.id || msg.from);
             out[id] = {
                 id,
+                authorProfileImage: contact?.avatar ?? null,
+                authorName,
+                authorColor: colorForId(authorId),
+                authorId,
                 chatId: slot.maps.chatId(msg.chatId),
-                authorName: msg.direction === 'outgoing' ? 'Me' : chat?.name || msg.from.split('@')[0],
-                authorId: msg.direction === 'outgoing' ? SELF_CONTACT_ID : slot.maps.contactId(
-                    slot.account.findContactByEmail(msg.from)?.id || msg.from,
-                ),
-                summary: msg.text?.slice(0, 100) || '',
+                chatProfileImage: basic.profileImage ?? null,
+                chatColor: basic.color,
+                chatName: basic.name,
+                chatType: basic.chatType,
+                isChatContactRequest: !!basic.isContactRequest,
+                isChatArchived: !!basic.archived,
+                message: msg.text || '',
+                // MessageSearchResult.timestamp is unix **seconds** (UI multiplies by 1000)
                 timestamp: tsSec(msg.timestamp),
             };
         }

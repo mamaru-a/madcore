@@ -21,9 +21,12 @@ bun run test:live-full
 | `config-backup.ts` | config, backup export, multi-relay |
 | `run.ts` | orchestrator (entry for `test:live-full`) |
 | **`madmail-docker-up.sh`** | Local madmail Docker (static IP `172.28.100.10`) |
+| **`download-madmail.sh`** | Fetch/extract madmail **binary** → `.tools/madmail` |
+| **`madmail-binary-up.sh`** / **`madmail-binary-down.sh`** | Run/stop madmail binary (CI / no Docker service) |
 | **`download-rpc-server.sh`** | Fetch `deltachat-rpc-server` into `.tools/` |
 | **`core-rpc.ts`** | **Pure JS** JSON-RPC client for `deltachat-rpc-server` (stdio) |
 | **`securejoin-docker.test.ts`** | bun:test SecureJoin matrix (madcore + core + cross) |
+| **`messaging-docker.test.ts`** | bun:test send/recv **decrypted** text (core + madcore + cross) |
 | `securejoin-docker.mjs` | thin CLI wrapper → bun test |
 | `securejoin_core_helper.py` | legacy Python helper (optional; not required) |
 
@@ -45,29 +48,41 @@ Brings up **madmail** on a fixed Docker bridge IP, downloads **deltachat-rpc-ser
 
 ```bash
 cd external/madcore
-make test
+make test      # local: Docker madmail + core binary
+make test-ci   # CI:    madmail binary + core binary
 ```
 
 | Target | What it does |
 |--------|----------------|
-| **`make test`** | **Full pipeline** (see below) |
-| `make test-init` | prereqs only: rpc-server + madmail + build |
+| **`make test`** | **Local full pipeline** (Docker madmail) |
+| **`make test-ci`** | **CI full pipeline** (madmail + core **binaries**) |
+| `make test-init` | prereqs only: rpc-server + Docker madmail + build |
+| `make test-init-ci` | prereqs only: both binaries + binary madmail + build |
 | `make test-unit` | offline unit only |
 | `make test-sj` | live SecureJoin only |
-| `make madmail-up` / `madmail-down` | Docker only (enables webimap + websmtp) |
+| `make madmail-up` / `madmail-down` | Docker only |
+| `make madmail-binary-up` / `madmail-binary-down` | binary only |
+| `make download-core` / `download-madmail` | fetch binaries into `.tools/` |
 
-**`make test` order:**
+**`make test` order (local / Docker):**
 
 1. Download/link `deltachat-rpc-server` → `.tools/`
-2. Start madmail on `172.28.100.10` and **enable webimap + websmtp**
+2. Start madmail Docker on `172.28.100.10` and **enable webimap + websmtp**
 3. `bun run build`
 4. Unit tests (`test/rpc/`)
-5. Live SecureJoin (declaration order in `securejoin-docker.test.ts`):
-   - **core ↔ core**
-   - **madcore ↔ madcore**
-   - **cross** both ways
+5. Live SecureJoin (core ↔ core, madcore ↔ madcore, cross both ways)
 
-### Manual
+**`make test-ci` order (pipeline / binary):**
+
+1. Download `deltachat-rpc-server` → `.tools/`
+2. Download/extract **madmail binary** → `.tools/madmail` (from GHCR image or GitHub release)
+3. Run madmail process on `https://127.0.0.1:8443` (unprivileged ports) + webimap/websmtp
+4. Build + unit + SecureJoin (same matrix)
+5. Stop madmail
+
+GitHub Actions: `.github/workflows/ci.yml` runs unit job + `make test-ci` live job.
+
+### Manual (Docker)
 
 ```bash
 # once
@@ -81,15 +96,28 @@ NODE_TLS_REJECT_UNAUTHORIZED=0 \
   bun test test/live/securejoin-docker.test.ts
 ```
 
-| Setting | Value |
-|---------|--------|
-| Network | `madmail-test` `172.28.100.0/24` |
-| Container IP | `172.28.100.10` |
-| HTTPS | `https://172.28.100.10/` (also `https://127.0.0.1:8443/`) |
-| Data dir | `external/madcore/.madmail-docker/` (gitignored) |
-| Core binary | `.tools/deltachat-rpc-server` or `DELTACHAT_RPC_SERVER` / PATH |
+### Manual (binary — CI-shaped)
 
-`madmail-docker-up.sh` enables **webimap** + **websmtp** (required for madcore).
+```bash
+bash test/live/download-rpc-server.sh
+bash test/live/download-madmail.sh
+bash test/live/madmail-binary-up.sh
+bun run build
+NODE_TLS_REJECT_UNAUTHORIZED=0 \
+  MADMAIL_URL=https://127.0.0.1:8443 \
+  bun test test/live/securejoin-docker.test.ts
+bash test/live/madmail-binary-down.sh
+```
+
+| Setting | Docker (local) | Binary (CI) |
+|---------|----------------|-------------|
+| Identity IP | `172.28.100.10` | `127.0.0.1` |
+| HTTPS | `https://172.28.100.10/` | `https://127.0.0.1:8443/` |
+| Data dir | `.madmail-docker/` | `.madmail-binary/` |
+| Madmail | container `ghcr.io/themadorg/madmail` | `.tools/madmail` process |
+| Core binary | `.tools/deltachat-rpc-server` | same |
+
+Both paths enable **webimap** + **websmtp** (required for madcore).
 
 Skip live suite: `SKIP_LIVE_SJ=1 bun test …`
 
@@ -101,6 +129,15 @@ Skip live suite: `SKIP_LIVE_SJ=1 bun test …`
 ✓ core ↔ core SecureJoin (deltachat-rpc-server)
 ✓ cross: core inviter → madcore joiner
 ✓ cross: madcore inviter → core joiner
+
+✓ core ↔ core send/receive decrypted text
+✓ madcore ↔ madcore send/receive decrypted text in store
+✓ cross messaging: core ↔ madcore decrypted both ways
+✓ cross messaging: madcore inviter ↔ core joiner decrypted both ways
 ```
+
+Messaging tests assert **plaintext** after decrypt:
+- **core** — `get_message().text` matches the sent string; `showPadlock === true`
+- **madcore** — `getChatMessages()` (MemoryStore / IndexedDB) has the same text
 
 Stop container: `make madmail-down` or `docker rm -f madmail-test`

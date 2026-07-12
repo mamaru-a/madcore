@@ -102,16 +102,14 @@ bun run test:rpc       # offline unit tests only (test/rpc)
 bun run test:live-full # live E2E (needs SERVER_URL)
 ```
 
-### SecureJoin + official core (local madmail Docker)
+### SecureJoin + official core
 
-One command runs the full process:
+**Local (Docker madmail):**
 
 ```bash
 make test
 # same as: bun run test
 ```
-
-That does, in order:
 
 1. Download / link `deltachat-rpc-server` → `.tools/`
 2. Start madmail Docker (static IP `172.28.100.10`) and **enable webimap + websmtp**
@@ -119,6 +117,15 @@ That does, in order:
 4. Offline unit tests (`test/rpc/`)
 5. **core ↔ core** SecureJoin (JS stdio client + rpc-server)
 6. **madcore** SecureJoin + cross with core (JS SDK over webimap/websmtp)
+
+**CI / no Docker service (madmail binary + core binary):**
+
+```bash
+make test-ci
+# same as: bun run test:ci
+```
+
+Same test matrix, but madmail is a plain process from `.tools/madmail` (extracted from the GHCR image or a GitHub release) listening on `https://127.0.0.1:8443`. GitHub Actions runs this via `.github/workflows/ci.yml`.
 
 Pure **JS** core client: `test/live/core-rpc.ts` (no Python).  
 Details: [test/live/README.md](./test/live/README.md).

@@ -404,6 +404,37 @@ export function buildMdnMime(opts: {
 }
 
 /**
+ * Whether we should ever send a wire MDN for this stored message.
+ * Core never MDNs device/system/local messages — only real peer mail.
+ */
+export function shouldSendReadReceipt(msg: {
+    from?: string | null;
+    chatId?: string | null;
+    type?: string | null;
+    id?: string | null;
+    direction?: string | null;
+}): boolean {
+    if (msg.direction && msg.direction !== 'incoming') return false;
+    if (msg.chatId === 'device-chat') return false;
+    if (msg.type === 'system' || msg.type === 'securejoin') return false;
+    const from = (msg.from || '').trim().toLowerCase();
+    if (!from || from === 'device' || from === 'system' || from === 'self') return false;
+    // Need a real SMTP recipient (addr with @); bare "device" is not deliverable
+    if (!from.includes('@')) return false;
+    const id = (msg.id || '').toLowerCase();
+    // Local/synthetic ids (device welcome, changelog, mock msgs)
+    if (
+        id.includes('@local') ||
+        id.startsWith('device-') ||
+        id.startsWith('<device-') ||
+        id.includes('device-changelog')
+    ) {
+        return false;
+    }
+    return true;
+}
+
+/**
  * Send a read receipt for an original message.
  * Wire matches Delta Chat core (`MimeFactory::from_mdn` / `render_mdn`):
  * multipart/report; report-type=disposition-notification + Original-Message-ID.
@@ -414,8 +445,22 @@ export async function sendReadReceipt(
     toEmail: string,
     originalMsgId: string,
 ): Promise<string> {
+    const to = (toEmail || '').trim();
+    if (!to || !to.includes('@') || to.toLowerCase() === 'device') {
+        throw new Error(`sendReadReceipt: invalid recipient "${toEmail}"`);
+    }
     const mid = normalizeRfc724Mid(originalMsgId);
     if (!mid) throw new Error('sendReadReceipt: missing original Message-ID');
+    // Never MDN synthetic/local message ids over the network
+    const midLower = mid.toLowerCase();
+    if (
+        midLower.includes('@local') ||
+        midLower.includes('device-changelog') ||
+        midLower.startsWith('<device-') ||
+        midLower.startsWith('device-')
+    ) {
+        throw new Error(`sendReadReceipt: refusing MDN for local/device message ${mid}`);
+    }
     const fromHeader = buildFromHeader(ctx);
     const innerMime = buildMdnMime({
         fromHeader,

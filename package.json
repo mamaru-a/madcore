@@ -72,8 +72,10 @@
     "typecheck": "tsc --noEmit",
     "prepublishOnly": "bun run typecheck && bun run build",
     "test": "make test",
+    "test:ci": "make test-ci",
     "test:rpc": "bun test test/rpc/",
     "test:init": "make test-init",
+    "test:init-ci": "make test-init-ci",
     "test:full": "bun run test/full.ts",
     "test:single": "bun run test/single.ts",
     "test:two-party": "bun run test/two-party.ts",
@@ -85,8 +87,9 @@
     "test:live": "bun run test/live-madmail.ts",
     "test:live-full": "bun run test/live/run.ts",
     "test:sj-docker-up": "bash test/live/madmail-docker-up.sh",
-    "test:sj-docker": "NODE_TLS_REJECT_UNAUTHORIZED=0 bun test test/live/securejoin-docker.test.ts",
-    "test:sj-docker-all": "NODE_TLS_REJECT_UNAUTHORIZED=0 bun test test/live/securejoin-docker.test.ts"
+    "test:sj-docker": "NODE_TLS_REJECT_UNAUTHORIZED=0 bun test test/live/securejoin-docker.test.ts test/live/messaging-docker.test.ts",
+    "test:sj-docker-all": "NODE_TLS_REJECT_UNAUTHORIZED=0 bun test test/live/securejoin-docker.test.ts test/live/messaging-docker.test.ts",
+    "test:msg-docker": "NODE_TLS_REJECT_UNAUTHORIZED=0 bun test test/live/messaging-docker.test.ts"
   },
   "dependencies": {
     "openpgp": "^6.0.1",

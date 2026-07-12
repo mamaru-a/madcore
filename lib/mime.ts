@@ -182,25 +182,65 @@ export interface ParseContext {
     privateKey: openpgp.PrivateKey | null;
     knownKeys: Map<string, string>;
     peerAvatars: Map<string, string>;
+    /**
+     * Persist a peer public key into the active account store
+     * (MemoryStore or IndexedDB — whichever the SDK was constructed with).
+     */
+    onPeerKey?: (email: string, armoredKey: string) => void;
 }
 
-/** Import every `Autocrypt:` header from a raw MIME source (outer or decrypted). */
+function rememberPeerKey(ctx: ParseContext, email: string, armoredKey: string): void {
+    cryptoLib.setKnownKey(ctx.knownKeys, email, armoredKey);
+    try {
+        ctx.onPeerKey?.(email, armoredKey);
+    } catch (e: any) {
+        log.warn('mime', `onPeerKey failed for ${email}: ${e?.message || e}`);
+    }
+}
+
+/**
+ * Import every `Autocrypt:` header from a raw MIME source (outer or decrypted).
+ *
+ * Autocrypt is the *sender's* key. Index under `addr` and under From only when
+ * they name the same mailbox (domain-literal / casing variants). Never map a
+ * key onto a different mailbox — that is what Autocrypt-Gossip is for, and
+ * doing so overwrote peer keys during SecureJoin (encrypt-to-wrong-key).
+ */
 function importAllAutocryptHeaders(
     source: string,
     from: string,
     ctx: ParseContext,
 ): void {
     // Unfold continuations then find each Autocrypt header line
+    // (must not match Autocrypt-Gossip — handled separately)
     const unfolded = source.replace(/\r?\n[ \t]+/g, ' ');
     const re = /^Autocrypt:\s*(.+)$/gim;
     let m: RegExpExecArray | null;
     while ((m = re.exec(unfolded)) !== null) {
         const parsed = cryptoLib.parseAutocryptHeader(m[1]);
         if (!parsed) continue;
-        // Always refresh — first-write-wins left stale keys after re-key / rejoin
-        cryptoLib.setKnownKey(ctx.knownKeys, parsed.addr, parsed.armoredKey);
-        if (from) cryptoLib.setKnownKey(ctx.knownKeys, from, parsed.armoredKey);
+        // Always refresh + persist to account store (Memory or IDB)
+        rememberPeerKey(ctx, parsed.addr, parsed.armoredKey);
+        if (from && cryptoLib.emailsEqual(from, parsed.addr)) {
+            rememberPeerKey(ctx, from, parsed.armoredKey);
+        }
         log.debug('mime', `Autocrypt imported for ${parsed.addr}`);
+    }
+}
+
+/**
+ * Import every `Autocrypt-Gossip:` header. Gossip is a third-party key —
+ * store only under its declared `addr`, never under the message From.
+ */
+function importAllAutocryptGossipHeaders(source: string, ctx: ParseContext): void {
+    const unfolded = source.replace(/\r?\n[ \t]+/g, ' ');
+    const re = /^Autocrypt-Gossip:\s*(.+)$/gim;
+    let m: RegExpExecArray | null;
+    while ((m = re.exec(unfolded)) !== null) {
+        const parsed = cryptoLib.parseAutocryptHeader(m[1]);
+        if (!parsed) continue;
+        rememberPeerKey(ctx, parsed.addr, parsed.armoredKey);
+        log.debug('mime', `Autocrypt-Gossip imported for ${parsed.addr}`);
     }
 }
 
@@ -295,7 +335,8 @@ export function detectReadReceipt(opts: {
 export async function parseIncoming(raw: IncomingMessage, ctx: ParseContext): Promise<ParsedMessage | null> {
     const body = raw.body || '';
     const headers = parseHeaders(body);
-    const from = extractEmail(headers['from'] || '');
+    // Prefer protected From after decrypt (hidden-recipients / list-id outer forms)
+    let from = extractEmail(headers['from'] || '');
     const to = extractEmail(headers['to'] || '');
     const rfc724mid = headers['message-id'] || null;
     
@@ -309,8 +350,9 @@ export async function parseIncoming(raw: IncomingMessage, ctx: ParseContext): Pr
     // Skip our own messages (bracketed vs bare IP must match)
     if (cryptoLib.emailsEqual(from, ctx.email)) return null;
 
-    // Import every Autocrypt header in the raw message (parseHeaders only keeps the last)
+    // Import every Autocrypt / Gossip header in the raw message (parseHeaders only keeps the last)
     importAllAutocryptHeaders(body, from, ctx);
+    importAllAutocryptGossipHeaders(body, ctx);
 
     // SecureJoin detection (aligned with core securejoin.rs get_secure_join_step):
     // 1) Secure-Join-Invitenumber alone → vc-request / vg-request
@@ -368,14 +410,22 @@ export async function parseIncoming(raw: IncomingMessage, ctx: ParseContext): Pr
             if (innerHeaders['chat-voice-message'] === '1') isVoiceMessage = true;
             if (innerHeaders['chat-duration']) voiceDurationMs = parseInt(innerHeaders['chat-duration'], 10);
 
-            // Import Autocrypt / Gossip from decrypted protected headers (always refresh)
+            // Prefer protected From (core + madcore put real addr inside ciphertext)
+            const protectedFrom = extractEmail(innerHeaders['from'] || '');
+            if (protectedFrom) {
+                from = protectedFrom;
+            }
+
+            // Import Autocrypt / Gossip from decrypted protected headers (always refresh).
+            // Order: sender Autocrypt first, then gossip (third-party only — never alias to From).
             importAllAutocryptHeaders(decryptedStr, from, ctx);
+            importAllAutocryptGossipHeaders(decryptedStr, ctx);
+            // Also pick up a single unfolded gossip value if parseHeaders folded it oddly
             const gossipHeader = innerHeaders['autocrypt-gossip'];
             if (gossipHeader) {
                 const parsed = cryptoLib.parseAutocryptHeader(gossipHeader);
                 if (parsed) {
                     cryptoLib.setKnownKey(ctx.knownKeys, parsed.addr, parsed.armoredKey);
-                    if (from) cryptoLib.setKnownKey(ctx.knownKeys, from, parsed.armoredKey);
                     log.debug('mime', `Imported gossip key for ${parsed.addr}`);
                 }
             }
