@@ -1,7 +1,7 @@
 /**
  * Live suite: chat list, search, drafts, archive/pin/mute, contacts, block.
  */
-import { PNG, tryMethod, type LiveAccount } from './harness';
+import { PNG, tryMethod, skip, type LiveAccount } from './harness';
 
 export async function runStoreChatSuite(
     account: LiveAccount,
@@ -25,12 +25,13 @@ export async function runStoreChatSuite(
     await tryMethod('findContactByEmail', () => account.findContactByEmail(peerEmail)?.email);
     await tryMethod('getUnreadCount', () => account.getUnreadCount());
     await tryMethod('markChatRead', () => account.markChatRead(chatId));
-    await tryMethod('markMessageSeen', async () => {
-        const msgs = await account.getChatMessages(chatId, 5, 0);
-        const inc = msgs.find((m: any) => m.direction === 'incoming');
-        if (inc) await account.markMessageSeen(inc.id);
-        else throw new Error('no incoming msg to mark');
-    });
+    const msgsForSeen = await account.getChatMessages(chatId, 50, 0);
+    const incoming = msgsForSeen.find((m: any) => m.direction === 'incoming');
+    if (incoming) {
+        await tryMethod('markMessageSeen', () => account.markMessageSeen(incoming.id));
+    } else {
+        skip('markMessageSeen', 'no incoming msg in store yet');
+    }
     await tryMethod('archiveChat', () => account.archiveChat(chatId, true));
     await tryMethod('archiveChat(un)', () => account.archiveChat(chatId, false));
     await tryMethod('pinChat', () => account.pinChat(chatId, true));

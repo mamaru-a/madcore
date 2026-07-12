@@ -52,12 +52,12 @@ export async function runGroupsSuite(
             account.updateGroupDescription(group, { newDescription: 'e2e desc' }));
         await tryMethod('addGroupMember', () =>
             account.addGroupMember(group, { email: bEmail }));
-        await tryMethod('removeGroupMember', () =>
-            account.removeGroupMember(group, { email: bEmail }));
         await tryMethod('setChatProfileImage(group)', () =>
             account.setChatProfileImage(group.grpId, { data: PNG, mimeType: 'image/png' }));
         await tryMethod('removeChatProfileImage(group)', () =>
             account.removeChatProfileImage(group.grpId));
+        await tryMethod('removeGroupMember', () =>
+            account.removeGroupMember(group, { email: bEmail }));
         await tryMethod('leaveGroup', () => account.leaveGroup(group));
     }
 
