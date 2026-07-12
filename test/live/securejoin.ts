@@ -52,5 +52,4 @@ export async function runSecureJoinExtras(account: LiveAccount, peerEmail: strin
         }
     });
     skip('sendSecureJoinAuth', 'requires mid-handshake state');
-    skip('joinGroup', 'needs group invite URI');
 }

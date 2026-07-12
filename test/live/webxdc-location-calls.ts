@@ -58,5 +58,4 @@ export async function runCallsSuite(account: LiveAccount, contact: LiveContact) 
     } else {
         skip('getCall/endCall', 'no call session');
     }
-    skip('acceptIncomingCall', 'requires inbound call from peer');
 }

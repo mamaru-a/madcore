@@ -91,10 +91,37 @@ export function resetHarness() {
 const sleep = (ms: number) => new Promise(r => setTimeout(r, ms));
 export { sleep };
 
-/** Wait for DC_EVENT_INCOMING_MSG with optional sender/text filters. */
+/** Wait for any DC event with optional predicate. */
+export function waitForEvent(
+    account: LiveAccount,
+    event: string,
+    opts: { timeoutMs?: number; predicate?: (e: any) => boolean } = {},
+): Promise<any> {
+    const timeoutMs = opts.timeoutMs ?? 60_000;
+    return new Promise((resolve, reject) => {
+        const timer = setTimeout(() => {
+            account.off(event, handler);
+            reject(new Error(`Timeout waiting for ${event} (${timeoutMs}ms)`));
+        }, timeoutMs);
+        const handler = (e: any) => {
+            if (opts.predicate && !opts.predicate(e)) return;
+            clearTimeout(timer);
+            account.off(event, handler);
+            resolve(e);
+        };
+        account.on(event, handler);
+    });
+}
+
+/** Wait for DC_EVENT_INCOMING_MSG with optional sender/text/type filters. */
 export function waitForIncomingMsg(
     account: LiveAccount,
-    opts: { fromEmail?: string; textIncludes?: string; timeoutMs?: number } = {},
+    opts: {
+        fromEmail?: string;
+        textIncludes?: string;
+        type?: string;
+        timeoutMs?: number;
+    } = {},
 ): Promise<any> {
     const timeoutMs = opts.timeoutMs ?? 60_000;
     return new Promise((resolve, reject) => {
@@ -106,6 +133,7 @@ export function waitForIncomingMsg(
             const msg = e.msg;
             if (!msg) return;
             if (opts.fromEmail && msg.from?.toLowerCase() !== opts.fromEmail.toLowerCase()) return;
+            if (opts.type && msg.type !== opts.type) return;
             if (opts.textIncludes && !msg.text?.includes(opts.textIncludes)) return;
             clearTimeout(timer);
             account.off('DC_EVENT_INCOMING_MSG', handler);

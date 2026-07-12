@@ -13,6 +13,9 @@ import { runDeliverySuite } from '../live/delivery';
 import { runQrHelpers, runSecureJoinExtras } from '../live/securejoin';
 import { runProfileSuite } from '../live/profile';
 import { runMessagingSuite } from '../live/messaging';
+import { runMessagingReceiveSuite } from '../live/messaging-receive';
+import { runWsSuite } from '../live/ws';
+import { runJoinGroupSuite, runIncomingCallSuite } from '../live/two-party-extras';
 import { runWebxdcSuite, runLocationSuite, runCallsSuite } from '../live/webxdc-location-calls';
 import { runGroupsSuite } from '../live/groups';
 import { runStoreChatSuite } from '../live/store-chat';
@@ -53,10 +56,24 @@ async function main() {
     console.log('\n── Messaging ──');
     await runMessagingSuite(a, contact);
 
+    if (mode === 'local' && b) {
+        console.log('\n── Messaging receive (peer assertions) ──');
+        await runMessagingReceiveSuite(a, b, aEmail, peerEmail, contact);
+    }
+
+    console.log('\n── WebIMAP WebSocket depth ──');
+    await runWsSuite(a, 'ci');
+
     console.log('\n── Webxdc / location / calls ──');
     await runWebxdcSuite(a, contact, peerEmail);
     await runLocationSuite(a, peerEmail);
     await runCallsSuite(a, contact);
+
+    if (mode === 'local' && b) {
+        console.log('\n── joinGroup + acceptIncomingCall ──');
+        await runJoinGroupSuite(a, b);
+        await runIncomingCallSuite(a, b, contact);
+    }
 
     console.log('\n── Groups / channels ──');
     await runGroupsSuite(a, b, peerEmail, joinTimeoutMs);
