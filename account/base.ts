@@ -242,7 +242,7 @@ export abstract class AccountBase {
             this.transports.set(serverUrl, t);
         }
         t.configure(serverUrl, { email, password });
-        if (!this.primaryRelayId) this.primaryRelayId = relayId;
+        this.primaryRelayId = relayId;
         this.schedulePersist();
     }
 

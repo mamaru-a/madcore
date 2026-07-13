@@ -29,7 +29,7 @@ export async function runStoreChatSuite(
     await tryMethod('markChatRead', () => account.markChatRead(chatId));
     let msgsForSeen = await account.getChatMessages(chatId, 50, 0);
     let incoming = msgsForSeen.find((m: any) => m.direction === 'incoming');
-    if (!incoming && peerAccount && accountEmail) {
+    if (!incoming?.id && peerAccount && accountEmail) {
         const seenMarker = `seen-${Date.now()}`;
         const seenWait = waitForIncomingMsg(account, {
             fromEmail: peerEmail,
@@ -37,11 +37,14 @@ export async function runStoreChatSuite(
             timeoutMs: 90_000,
         });
         await peerAccount.sendMessage(accountEmail, seenMarker);
-        await seenWait;
+        const seenMsg = await seenWait;
         await sleep(500);
-        msgsForSeen = await account.getChatMessages(chatId, 50, 0);
-        incoming = msgsForSeen.find((m: any) => m.direction === 'incoming' && m.text?.includes(seenMarker))
-            || msgsForSeen.find((m: any) => m.direction === 'incoming');
+        incoming = seenMsg;
+        if (!incoming?.id) {
+            msgsForSeen = await account.getChatMessages(chatId, 50, 0);
+            incoming = msgsForSeen.find((m: any) => m.direction === 'incoming' && m.text?.includes(seenMarker))
+                || msgsForSeen.find((m: any) => m.direction === 'incoming');
+        }
     }
     await tryMethod('markMessageSeen', async () => {
         if (!incoming?.id) throw new Error('no incoming msg for markMessageSeen');

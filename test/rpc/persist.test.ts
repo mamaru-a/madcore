@@ -110,6 +110,19 @@ describe('account persistence', () => {
         expect(await dc.listPersistedAccounts()).toEqual([]);
     });
 
+    it('exportBackup exports the active account in a shared MemoryStore', async () => {
+        const store = new MemoryStore();
+        const a = new DeltaChatAccount(store, 'a1', 'alice@relay.test', 'pw', 'https://relay.test');
+        const b = new DeltaChatAccount(store, 'b1', 'bob@relay.test', 'pw2', 'https://relay.test');
+        await a.generateKeys('Alice');
+        await b.generateKeys('Bob');
+        await a.setConfig('e2e_owner', 'alice');
+        const blob = await a.exportBackup();
+        const parsed = JSON.parse(blob);
+        expect(parsed.account.email).toBe('alice@relay.test');
+        expect(parsed.config?.e2e_owner).toBe('alice');
+    });
+
     it('exportBackup / importBackup round-trip restores config', async () => {
         const store = new MemoryStore();
         const a = new DeltaChatAccount(store, 'bk1', 'backup@relay.test', 'pw', 'https://relay.test');

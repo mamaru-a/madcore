@@ -1,15 +1,17 @@
 /**
  * Live suite: config, push hooks, device messages, backup, multi-relay.
  */
-import type { DeltaChatSDK } from '../../sdk';
+import { DeltaChatSDK, DeltaChatAccount } from '../../sdk';
+import { MemoryStore } from '../../store';
 import { tryMethod, sleep, type LiveAccount } from './harness';
 
 export async function runImportBackupSuite(
-    dc: ReturnType<typeof DeltaChatSDK>,
+    _dc: ReturnType<typeof DeltaChatSDK>,
     server: string,
 ) {
     const marker = `import-${Date.now()}`;
-    const srcReg = await tryMethod('importBackup/setup src', () => dc.register(server, 'E2E BackupSrc'));
+    const iso = DeltaChatSDK({ store: new MemoryStore(), logLevel: 'warn' });
+    const srcReg = await tryMethod('importBackup/setup src', () => iso.register(server, 'E2E BackupSrc'));
     if (!srcReg?.account) return;
     const src = srcReg.account as LiveAccount;
     await tryMethod('importBackup/src keys', () => src.generateKeys('BackupSrc'));
@@ -24,10 +26,7 @@ export async function runImportBackupSuite(
     if (!blob) return;
     src.disconnect();
 
-    const dstReg = await tryMethod('importBackup/setup dst', () => dc.register(server, 'E2E BackupDst'));
-    if (!dstReg?.account) return;
-    const dst = dstReg.account as LiveAccount;
-    const dstId = dst.id;
+    const dst = new DeltaChatAccount(new MemoryStore()) as LiveAccount;
     await tryMethod('importBackup/live import', async () => {
         await dst.importBackup(blob);
         const v = await dst.getConfig('e2e_import_marker');
@@ -39,8 +38,7 @@ export async function runImportBackupSuite(
     });
     dst.disconnect();
     await tryMethod('importBackup/cleanup', () => {
-        dc.removeAccount(dstId);
-        dc.removeAccount(srcId);
+        iso.removeAccount(srcId);
     });
 }
 

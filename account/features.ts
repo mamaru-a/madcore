@@ -87,7 +87,9 @@ export abstract class AccountFeatures extends AccountInbox {
 
     async exportBackup(opts?: { passphrase?: string }): Promise<string> {
         await this.saveToStore();
-        const account = await this.store.getAccount();
+        const email = this.credentials.email?.toLowerCase();
+        const account = (email ? await this.store.getAccountByEmail(email) : null)
+            || await this.store.getAccount();
         if (!account) throw new Error('No account to export');
         const payload: backupLib.BackupPayload = {
             v: backupLib.BACKUP_VERSION,

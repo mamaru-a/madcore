@@ -9,6 +9,13 @@ NET="${MADMAIL_NET:-madmail-e2e-net}"
 IP="${MADMAIL_IP:-172.28.100.10}"
 NAME="${MADMAIL_CONTAINER_NAME:-madmail-e2e}"
 IMAGE="${MADMAIL_IMAGE:-ghcr.io/themadorg/madmail:latest}"
+MADMAIL_SRC="${MADMAIL_SRC:-$ROOT/../madmail}"
+
+if [[ "${MADMAIL_BUILD_LOCAL:-}" == "1" && -f "$MADMAIL_SRC/Dockerfile" ]]; then
+  echo "Building local madmail image from $MADMAIL_SRC …"
+  docker build -t madmail-e2e:local "$MADMAIL_SRC"
+  IMAGE="madmail-e2e:local"
+fi
 
 mkdir -p "$DATA"/{lib,etc,run}
 
