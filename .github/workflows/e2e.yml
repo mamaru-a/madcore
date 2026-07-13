@@ -1,5 +1,5 @@
 # E2E tests — madcore SDK against a live madmail instance (Alice↔Bob on one relay).
-# All build + test runs on GitHub Actions (no local madmail build required).
+# Uses the published GHCR image (no madmail source checkout or rebuild).
 name: E2E
 
 on:
@@ -19,32 +19,22 @@ permissions:
 
 jobs:
   e2e:
-    name: Build madmail + smoke + full E2E
+    name: Smoke + full E2E (published madmail)
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    timeout-minutes: 30
 
     steps:
       - name: Checkout madcore
         uses: actions/checkout@v4
-
-      - name: Checkout madmail
-        uses: actions/checkout@v4
-        with:
-          repository: themadorg/madmail
-          path: madmail
-          submodules: recursive
 
       - name: Setup Bun
         uses: oven-sh/setup-bun@v2
         with:
           bun-version: latest
 
-      - name: Build madmail image (CI only)
-        run: docker build -t madmail-e2e:local madmail
-
       - name: Start madmail
         env:
-          MADMAIL_IMAGE: madmail-e2e:local
+          MADMAIL_IMAGE: ghcr.io/themadorg/madmail:latest
         run: bash scripts/ci/start-madmail.sh
 
       - name: Install dependencies
