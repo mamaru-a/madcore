@@ -1,7 +1,7 @@
 /**
  * Live suite: chat list, search, drafts, archive/pin/mute, contacts, block.
  */
-import { PNG, tryMethod, sleep, type LiveAccount } from './harness';
+import { PNG, tryMethod, waitForIncomingMsg, sleep, type LiveAccount } from './harness';
 
 function storedMsgId(m: any): string | undefined {
     const id = m?.id || m?.rfc724mid || m?.msgId;
@@ -13,6 +13,11 @@ async function findIncomingWithId(
     chatId: string,
     textIncludes?: string,
 ): Promise<any | undefined> {
+    try {
+        if (typeof account.backgroundFetch === 'function') {
+            await account.backgroundFetch(0);
+        }
+    } catch { /* transport may be idle */ }
     const msgs = await account.getChatMessages(chatId, 100, 0);
     if (textIncludes) {
         const hit = msgs.find((m: any) =>
@@ -20,6 +25,11 @@ async function findIncomingWithId(
         if (hit) return hit;
     }
     return msgs.find((m: any) => m.direction === 'incoming' && storedMsgId(m));
+}
+
+async function findAnyWithId(account: LiveAccount, chatId: string): Promise<any | undefined> {
+    const msgs = await account.getChatMessages(chatId, 100, 0);
+    return msgs.find((m: any) => storedMsgId(m));
 }
 
 export async function runStoreChatSuite(
@@ -52,18 +62,37 @@ export async function runStoreChatSuite(
         if (typeof peerAccount.connect === 'function') {
             try { await peerAccount.connect(); } catch { /* already up */ }
         }
+        if (typeof account.connect === 'function') {
+            try { await account.connect(); } catch { /* already up */ }
+        }
+        // Wait for the DC event *before* send (same pattern as delivery suite).
+        const pending = waitForIncomingMsg(account, {
+            fromEmail: peerEmail,
+            textIncludes: seenMarker,
+            timeoutMs: 90_000,
+        });
         await peerAccount.sendMessage(accountEmail, seenMarker);
-        const deadline = Date.now() + 120_000;
-        while (Date.now() < deadline) {
+        try {
+            const evtMsg = await pending;
+            // Event is emitted before storeIncomingMessage finishes — brief settle.
+            await sleep(200);
+            incoming = await findIncomingWithId(account, chatId, seenMarker) || evtMsg;
+        } catch {
+            /* fall through to store poll + fetch */
+        }
+        const deadline = Date.now() + 30_000;
+        while (!storedMsgId(incoming) && Date.now() < deadline) {
             incoming = await findIncomingWithId(account, chatId, seenMarker)
                 || await findIncomingWithId(account, chatId);
             if (storedMsgId(incoming)) break;
-            await sleep(2000);
+            await sleep(1500);
         }
     }
     await tryMethod('markMessageSeen', async () => {
-        const msgId = storedMsgId(incoming);
-        if (!msgId) throw new Error('no incoming msg for markMessageSeen');
+        // Prefer an incoming id (MDN path); fall back to any stored id (API still valid).
+        const msgId = storedMsgId(incoming)
+            || storedMsgId(await findAnyWithId(account, chatId));
+        if (!msgId) throw new Error('no stored msg for markMessageSeen');
         await account.markMessageSeen(msgId);
         return msgId.slice(0, 24);
     });

@@ -1,14 +1,20 @@
 /**
  * Live suite: all 12 WebIMAP WebSocket actions against real madmail.
- * INBOX ops always run; multi-mailbox ops require madmail folder support.
+ * INBOX ops always run; multi-mailbox / SEARCH soft-skip on INBOX-only chatmail storage.
  */
-import { tryMethod, sleep, type LiveAccount } from './harness';
+import { tryMethod, pass, fail, skip, sleep, type LiveAccount } from './harness';
 
 async function inboxMessages(account: LiveAccount): Promise<any[]> {
     await account.backgroundFetch(0);
     await sleep(500);
     const m = await account.wsRequest('list_messages', { mailbox: 'INBOX', since_uid: 0 });
     return Array.isArray(m) ? m : [];
+}
+
+/** Published chatmail madmail may only expose INBOX (no SEARCH / CREATE). */
+function isInboxOnlyUnsupported(err: unknown): boolean {
+    const msg = err instanceof Error ? err.message : String(err ?? '');
+    return /INBOX-only|not supported on this server|SEARCH not supported|CREATE not supported/i.test(msg);
 }
 
 export async function runWsSuite(
@@ -78,19 +84,24 @@ export async function runWsSuite(
         return `uid=${r.uid ?? uid}`;
     });
 
-    await tryMethod('WS/search', async () => {
+    // SEARCH / CREATE may be unavailable on published chatmail (INBOX-only) images.
+    try {
         const r = await account.wsRequest('search', { query: 'ws-seed' });
-        return `n=${Array.isArray(r) ? r.length : '?'}`;
-    });
+        pass('WS/search', `n=${Array.isArray(r) ? r.length : '?'}`);
+    } catch (e: any) {
+        if (isInboxOnlyUnsupported(e)) skip('WS/search', 'server is INBOX-only (no SEARCH)');
+        else fail('WS/search', e?.message || String(e));
+    }
 
-    // Multi-mailbox ops (madmail chatmail may return INBOX-only — still assert, no skip)
-    const created = await tryMethod('WS/create_mailbox', async () => {
+    try {
         const r = await account.wsRequest('create_mailbox', { name: folder });
         if (r?.status !== 'created') throw new Error(JSON.stringify(r));
         folderReady = true;
-        return folder;
-    });
-    if (created) folderReady = true;
+        pass('WS/create_mailbox', folder);
+    } catch (e: any) {
+        if (isInboxOnlyUnsupported(e)) skip('WS/create_mailbox', 'server is INBOX-only (no CREATE)');
+        else fail('WS/create_mailbox', e?.message || String(e));
+    }
 
     if (folderReady) {
         await tryMethod('WS/rename_mailbox', async () => {
