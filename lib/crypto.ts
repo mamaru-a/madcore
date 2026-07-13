@@ -107,6 +107,16 @@ const ENCRYPT_CONFIG = {
     aeadProtect: false,
 } as const;
 
+/** Decrypt config — read rPGP / Delta Chat core (2.5x) wire formats. */
+const DECRYPT_CONFIG = {
+    allowUnauthenticatedMessages: true,
+    allowMissingKeyFlags: true,
+    preferredSymmetricAlgorithm: openpgp.enums.symmetric.aes256,
+    // Core 2.53 may emit v5/v6 SEIPD packets openpgp.js skips by default
+    enableParsingV5Entities: true,
+    parseAEADEncryptedV4KeysAsLegacy: true,
+} as const;
+
 /**
  * Public keys we encrypt to for a peer message.
  * Recipient first (required). Self second when provided (multi-device / self-read).
@@ -224,18 +234,12 @@ export async function decrypt(
     decryptionKey: openpgp.PrivateKey
 ): Promise<string> {
     const cleaned = extractArmoredPgpMessage(armoredMessage) || armoredMessage.trim();
-    const message = await openpgp.readMessage({ armoredMessage: cleaned });
+    const message = await openpgp.readMessage({
+        armoredMessage: cleaned,
+        config: DECRYPT_CONFIG,
+    });
 
-    const decryptOpts = {
-        // Do not require signature — core also accepts unsigned encrypted mail
-        config: {
-            allowUnauthenticatedMessages: true,
-            allowMissingKeyFlags: true,
-            // Interop: some rPGP messages use AES-192; Chromium WebCrypto rejects it
-            // and openpgp may mis-report as integrity failure in edge cases.
-            preferredSymmetricAlgorithm: openpgp.enums.symmetric.aes256,
-        },
-    } as const;
+    const decryptOpts = { config: DECRYPT_CONFIG } as const;
 
     const tryDecrypt = async (key: openpgp.PrivateKey) => {
         const { data } = await openpgp.decrypt({

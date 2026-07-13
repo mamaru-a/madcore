@@ -1,7 +1,26 @@
 /**
  * Live suite: chat list, search, drafts, archive/pin/mute, contacts, block.
  */
-import { PNG, tryMethod, waitForIncomingMsg, sleep, type LiveAccount } from './harness';
+import { PNG, tryMethod, sleep, type LiveAccount } from './harness';
+
+function storedMsgId(m: any): string | undefined {
+    const id = m?.id || m?.rfc724mid || m?.msgId;
+    return id ? String(id) : undefined;
+}
+
+async function findIncomingWithId(
+    account: LiveAccount,
+    chatId: string,
+    textIncludes?: string,
+): Promise<any | undefined> {
+    const msgs = await account.getChatMessages(chatId, 100, 0);
+    if (textIncludes) {
+        const hit = msgs.find((m: any) =>
+            m.direction === 'incoming' && storedMsgId(m) && m.text?.includes(textIncludes));
+        if (hit) return hit;
+    }
+    return msgs.find((m: any) => m.direction === 'incoming' && storedMsgId(m));
+}
 
 export async function runStoreChatSuite(
     account: LiveAccount,
@@ -27,42 +46,26 @@ export async function runStoreChatSuite(
     await tryMethod('findContactByEmail', () => account.findContactByEmail(peerEmail)?.email);
     await tryMethod('getUnreadCount', () => account.getUnreadCount());
     await tryMethod('markChatRead', () => account.markChatRead(chatId));
-    let msgsForSeen = await account.getChatMessages(chatId, 50, 0);
-    let incoming = msgsForSeen.find((m: any) => m.direction === 'incoming' && m.id);
-    if (!incoming?.id && peerAccount && accountEmail) {
+    let incoming = await findIncomingWithId(account, chatId);
+    if (!storedMsgId(incoming) && peerAccount && accountEmail) {
         const seenMarker = `seen-${Date.now()}`;
-        const seenWait = waitForIncomingMsg(account, {
-            fromEmail: peerEmail,
-            textIncludes: seenMarker,
-            timeoutMs: 120_000,
-        });
         if (typeof peerAccount.connect === 'function') {
             try { await peerAccount.connect(); } catch { /* already up */ }
         }
         await peerAccount.sendMessage(accountEmail, seenMarker);
-        try {
-            incoming = await seenWait;
-        } catch {
-            const deadline = Date.now() + 120_000;
-            while (Date.now() < deadline) {
-                await sleep(2000);
-                msgsForSeen = await account.getChatMessages(chatId, 50, 0);
-                incoming = msgsForSeen.find((m: any) =>
-                    m.direction === 'incoming' && m.text?.includes(seenMarker) && m.id)
-                    || msgsForSeen.find((m: any) => m.direction === 'incoming' && m.id);
-                if (incoming?.id) break;
-            }
-        }
-        if (!incoming?.id) {
-            msgsForSeen = await account.getChatMessages(chatId, 50, 0);
-            incoming = msgsForSeen.find((m: any) => m.direction === 'incoming' && m.text?.includes(seenMarker))
-                || msgsForSeen.find((m: any) => m.direction === 'incoming' && m.id);
+        const deadline = Date.now() + 120_000;
+        while (Date.now() < deadline) {
+            incoming = await findIncomingWithId(account, chatId, seenMarker)
+                || await findIncomingWithId(account, chatId);
+            if (storedMsgId(incoming)) break;
+            await sleep(2000);
         }
     }
     await tryMethod('markMessageSeen', async () => {
-        if (!incoming?.id) throw new Error('no incoming msg for markMessageSeen');
-        await account.markMessageSeen(incoming.id);
-        return incoming.id.slice(0, 24);
+        const msgId = storedMsgId(incoming);
+        if (!msgId) throw new Error('no incoming msg for markMessageSeen');
+        await account.markMessageSeen(msgId);
+        return msgId.slice(0, 24);
     });
     await tryMethod('archiveChat', () => account.archiveChat(chatId, true));
     await tryMethod('archiveChat(un)', () => account.archiveChat(chatId, false));
