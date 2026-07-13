@@ -1,4 +1,5 @@
 # E2E tests — madcore SDK against a live madmail instance (Alice↔Bob on one relay).
+# All build + test runs on GitHub Actions (no local madmail build required).
 name: E2E
 
 on:
@@ -17,10 +18,10 @@ permissions:
   packages: read
 
 jobs:
-  smoke:
-    name: Smoke (madmail + 2-party)
+  e2e:
+    name: Build madmail + smoke + full E2E
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 60
 
     steps:
       - name: Checkout madcore
@@ -38,7 +39,7 @@ jobs:
         with:
           bun-version: latest
 
-      - name: Build madmail image
+      - name: Build madmail image (CI only)
         run: docker build -t madmail-e2e:local madmail
 
       - name: Start madmail
@@ -63,51 +64,6 @@ jobs:
           mkdir -p test-results
           bun run test:ci-smoke
 
-      - name: Upload smoke test report
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: test-results-smoke
-          path: test-results/
-          if-no-files-found: ignore
-
-      - name: Stop madmail
-        if: always()
-        run: bash scripts/ci/stop-madmail.sh
-
-  e2e-full:
-    name: Full E2E suite
-    runs-on: ubuntu-latest
-    timeout-minutes: 45
-    needs: smoke
-
-    steps:
-      - name: Checkout madcore
-        uses: actions/checkout@v4
-
-      - name: Checkout madmail
-        uses: actions/checkout@v4
-        with:
-          repository: themadorg/madmail
-          path: madmail
-          submodules: recursive
-
-      - name: Setup Bun
-        uses: oven-sh/setup-bun@v2
-        with:
-          bun-version: latest
-
-      - name: Build madmail image
-        run: docker build -t madmail-e2e:local madmail
-
-      - name: Start madmail
-        env:
-          MADMAIL_IMAGE: madmail-e2e:local
-        run: bash scripts/ci/start-madmail.sh
-
-      - name: Install dependencies
-        run: bun install --frozen-lockfile
-
       - name: Full E2E tests
         env:
           SERVER_URL: https://127.0.0.1:8443
@@ -116,15 +72,13 @@ jobs:
           TEST_RESULTS_DIR: test-results
           GITHUB_SHA: ${{ github.sha }}
           GITHUB_RUN_ID: ${{ github.run_id }}
-        run: |
-          mkdir -p test-results
-          bun run test:ci-e2e
+        run: bun run test:ci-e2e
 
-      - name: Upload E2E test report
+      - name: Upload test reports
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: test-results-e2e-full
+          name: test-results-e2e
           path: test-results/
           if-no-files-found: ignore
 

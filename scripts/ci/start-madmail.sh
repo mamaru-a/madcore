@@ -11,6 +11,8 @@ NAME="${MADMAIL_CONTAINER_NAME:-madmail-e2e}"
 IMAGE="${MADMAIL_IMAGE:-ghcr.io/themadorg/madmail:latest}"
 MADMAIL_SRC="${MADMAIL_SRC:-$ROOT/../madmail}"
 
+# Optional dev-only: MADMAIL_BUILD_LOCAL=1 builds from ../madmail on your machine.
+# CI builds madmail in .github/workflows/e2e.yml — do not rely on this path in Actions.
 if [[ "${MADMAIL_BUILD_LOCAL:-}" == "1" && -f "$MADMAIL_SRC/Dockerfile" ]]; then
   echo "Building local madmail image from $MADMAIL_SRC …"
   docker build -t madmail-e2e:local "$MADMAIL_SRC"
