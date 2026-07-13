@@ -4,6 +4,7 @@ import {
     buildInnerText,
     buildInnerMultipart,
     buildPgpMimeEnvelope,
+    buildSymmSecureJoinInnerMime,
     bracketEmail,
 } from '../../lib/mime-build';
 import {
@@ -106,6 +107,38 @@ describe('mime-build', () => {
         expect(raw).toContain('application/pgp-encrypted');
         expect(raw).toContain('-----BEGIN PGP MESSAGE-----');
         expect(raw).toContain('Autocrypt: addr=alice@relay.example');
+    });
+
+    it('buildSymmSecureJoinInnerMime matches core protected + HP-Outer shape', () => {
+        const inner = buildSymmSecureJoinInnerMime({
+            step: 'vc-pubkey',
+            auth: 'tok',
+            fromAddr: 'alice@[127.0.0.1]',
+            msgId: '<m@x>',
+            date: 'Mon, 1 Jan 2024 00:00:00 GMT',
+            autocryptHeader: 'Autocrypt: addr=alice@[127.0.0.1]; prefer-encrypt=mutual;\r\n keydata=KEY',
+        });
+        expect(inner).toContain('From: alice@[127.0.0.1]');
+        expect(inner).not.toContain('From: <alice');
+        expect(inner).toContain('Secure-Join: vc-pubkey');
+        expect(inner).toContain('Secure-Join-Auth: tok');
+        expect(inner).toContain('HP-Outer: From: alice@[127.0.0.1]');
+        expect(inner).toContain('HP-Outer: Subject: [...]');
+        expect(inner).toContain('protected-headers="v1"');
+        expect(inner).toMatch(/\r\n\r\nSecure-Join$/);
+    });
+
+    it('buildPgpMimeEnvelope can omit Chat-Version for symm SecureJoin', () => {
+        const raw = buildPgpMimeEnvelope({
+            fromHeader: 'From: alice@x',
+            toHeader: 'hidden-recipients:;',
+            msgId: '<id@x>',
+            includeChatVersion: false,
+            autocryptHeader: 'Autocrypt: x',
+            armored: 'ARM',
+        });
+        expect(raw).not.toContain('Chat-Version');
+        expect(raw).toContain('From: alice@x');
     });
 
     it('buildPgpMimeEnvelope does not duplicate Chat-Version', () => {

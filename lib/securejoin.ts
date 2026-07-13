@@ -20,7 +20,7 @@ import {
     encryptSymmetricSecureJoin,
     secureJoinSharedSecret,
 } from './crypto.js';
-import { buildPgpMimeEnvelope } from './mime-build.js';
+import { buildPgpMimeEnvelope, buildSymmSecureJoinInnerMime } from './mime-build.js';
 
 const crypto = globalThis.crypto;
 
@@ -524,20 +524,18 @@ export async function sendSecureJoinPubkey(
     const fromAddr = ctx.credentials.email;
     const msgId = ctx.generateMsgId();
     const now = new Date().toUTCString();
-    const outerFrom = `From: <${fromAddr}>`;
+    // Core symm SecureJoin: bare From (no brackets) so Autocrypt addr matches From.
+    const outerFrom = `From: ${fromAddr}`;
+    const autocryptHeader = ctx.buildAutocryptHeader();
 
-    const innerMime = [
-        `Content-Type: text/plain; charset="utf-8"; protected-headers="v1"; hp="cipher"`,
-        `Secure-Join: ${step}`,
-        `Secure-Join-Auth: ${authToken}`,
-        outerFrom,
-        `To: hidden-recipients:;`,
-        `Date: ${now}`,
-        `Subject: Secure-Join`,
-        `Message-ID: ${msgId}`,
-        '',
-        'Secure-Join',
-    ].join('\r\n');
+    const innerMime = buildSymmSecureJoinInnerMime({
+        step,
+        auth: authToken,
+        fromAddr,
+        msgId,
+        date: now,
+        autocryptHeader,
+    });
 
     const armored = await encryptSymmetricSecureJoin(innerMime, sharedSecret, ctx.privateKey);
     const rawEmail = buildPgpMimeEnvelope({
@@ -547,7 +545,8 @@ export async function sendSecureJoinPubkey(
         date: now,
         subject: '[...]',
         outerHeaders: [],
-        autocryptHeader: ctx.buildAutocryptHeader(),
+        includeChatVersion: false,
+        autocryptHeader,
         armored,
     });
 

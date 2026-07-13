@@ -53,25 +53,38 @@ async function saltedS2KDerive(passphrase: string, salt: Uint8Array, numBytes: n
     return out;
 }
 
-/** OpenPGP AES-CFB (encrypt) with feedback on ciphertext; IV is zero block. */
-async function aesCfbEncrypt(key: Uint8Array, plaintext: Uint8Array): Promise<Uint8Array> {
-    const blockSize = 16;
-    const iv = new Uint8Array(blockSize);
-    const out = new Uint8Array(plaintext.length);
-    let fr = iv;
-    let pos = 0;
-    while (pos < plaintext.length) {
-        const fre = await aesEcbBlock(key, fr);
-        const n = Math.min(blockSize, plaintext.length - pos);
-        const blockOut = new Uint8Array(n);
-        for (let i = 0; i < n; i++) {
-            blockOut[i] = plaintext[pos + i] ^ fre[i];
-            out[pos + i] = blockOut[i];
+/** rPGP SKESK v4 session-key wrapping — regular AES-CFB, IV = 0 (not OpenPGP CFB). */
+async function aesCfbEncryptRegular(key: Uint8Array, plaintext: Uint8Array): Promise<Uint8Array> {
+    try {
+        const { createCipheriv } = await import('node:crypto');
+        const cipher = createCipheriv('aes-128-cfb', Buffer.from(key), Buffer.alloc(16, 0));
+        cipher.setAutoPadding(false);
+        return new Uint8Array(Buffer.concat([cipher.update(Buffer.from(plaintext)), cipher.final()]));
+    } catch {
+        // Browser fallback: standard CFB-128 encrypt (ciphertext feedback).
+        const blockSize = 16;
+        const iv = new Uint8Array(blockSize);
+        const out = new Uint8Array(plaintext.length);
+        let shiftRegister = iv;
+        let pos = 0;
+        while (pos < plaintext.length) {
+            const keystream = await aesEcbBlock(key, shiftRegister);
+            const n = Math.min(blockSize, plaintext.length - pos);
+            for (let i = 0; i < n; i++) {
+                out[pos + i] = plaintext[pos + i] ^ keystream[i];
+            }
+            if (n === blockSize) {
+                shiftRegister = out.subarray(pos, pos + blockSize);
+            } else {
+                const next = new Uint8Array(blockSize);
+                next.set(shiftRegister.subarray(n));
+                next.set(out.subarray(pos, pos + n), blockSize - n);
+                shiftRegister = next;
+            }
+            pos += n;
         }
-        fr = blockOut.length === blockSize ? blockOut : new Uint8Array(fre);
-        pos += n;
+        return out;
     }
-    return out;
 }
 
 async function aesEcbBlock(key: Uint8Array, block: Uint8Array): Promise<Uint8Array> {
@@ -140,7 +153,7 @@ async function buildSaltedEskPacket(
     const payload = new Uint8Array(1 + sessionKey.length);
     payload[0] = algorithm;
     payload.set(sessionKey, 1);
-    const encrypted = await aesCfbEncrypt(derived, payload);
+    const encrypted = await aesCfbEncryptRegular(derived, payload);
     const body = new Uint8Array(2 + 1 + 1 + 8 + encrypted.length);
     let o = 0;
     body[o++] = 4; // ESK version
@@ -175,7 +188,7 @@ export async function encryptSymmetricSecureJoinRpgp(
     sharedSecret: string,
     signingKey: openpgp.PrivateKey,
 ): Promise<string> {
-    // Sign + encrypt in one step so packet order matches rPGP/core (not sign-then-encrypt).
+    // Sign-then-encrypt at the literal layer (matches rPGP MessageBuilder: OPS+body+sig inside SEIPD).
     const encBinary = (await openpgp.encrypt({
         message: await openpgp.createMessage({
             binary: new TextEncoder().encode(rawMimePayload),
@@ -186,14 +199,23 @@ export async function encryptSymmetricSecureJoinRpgp(
         config: RPGP_SYMM_CONFIG,
     })) as Uint8Array;
 
-    const skeskPkt = parsePacket(encBinary, 0);
-    const seipPkt = parsePacket(encBinary, skeskPkt.next);
-    if (skeskPkt.tag !== 3 || seipPkt.tag !== 18) {
-        throw new Error(`Unexpected PGP packet sequence: ${skeskPkt.tag}, ${seipPkt.tag}`);
+    const packets: ReturnType<typeof parsePacket>[] = [];
+    let offset = 0;
+    while (offset < encBinary.length) {
+        const pkt = parsePacket(encBinary, offset);
+        packets.push(pkt);
+        offset = pkt.next;
+    }
+
+    const skeskIdx = packets.findIndex(p => p.tag === 3);
+    const seipIdx = packets.findIndex(p => p.tag === 18);
+    if (skeskIdx < 0 || seipIdx < 0) {
+        const tags = packets.map(p => p.tag).join(', ');
+        throw new Error(`Unexpected PGP packet sequence (tags: ${tags})`);
     }
 
     const skesk = new openpgp.SymEncryptedSessionKeyPacket() as unknown as SkeskWire;
-    skesk.read(skeskPkt.body);
+    skesk.read(packets[skeskIdx]!.body);
     await skesk.decrypt(sharedSecret, RPGP_SYMM_CONFIG);
     if (!skesk.sessionKey) {
         throw new Error('Failed to extract session key for salted ESK');
@@ -205,8 +227,18 @@ export async function encryptSymmetricSecureJoinRpgp(
         openpgp.enums.symmetric.aes128;
 
     const eskBytes = await buildSaltedEskPacket(sharedSecret, new Uint8Array(skesk.sessionKey), algo);
-    const all = new Uint8Array(eskBytes.length + seipPkt.packetBytes.length);
-    all.set(eskBytes, 0);
-    all.set(seipPkt.packetBytes, eskBytes.length);
+
+    // Keep SEIPD and any trailing packets (openpgp v6 may append signature metadata after SEIPD).
+    const chunks: Uint8Array[] = [];
+    for (let i = 0; i < packets.length; i++) {
+        chunks.push(i === skeskIdx ? eskBytes : packets[i]!.packetBytes);
+    }
+    const totalLen = chunks.reduce((n, c) => n + c.length, 0);
+    const all = new Uint8Array(totalLen);
+    let pos = 0;
+    for (const c of chunks) {
+        all.set(c, pos);
+        pos += c.length;
+    }
     return armorMessage(all);
 }

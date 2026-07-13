@@ -32,6 +32,8 @@ export interface PgpEnvelopeOptions {
     subject?: string;
     /** Extra outer headers (Chat-Version is always added if missing) */
     outerHeaders?: string[];
+    /** When false, omit Chat-Version (core symm SecureJoin messages). Default true. */
+    includeChatVersion?: boolean;
     autocryptHeader: string;
     armored: string;
 }
@@ -133,8 +135,9 @@ export function buildPgpMimeEnvelope(opts: PgpEnvelopeOptions): string {
     const subject = opts.subject ?? '[...]';
 
     const outer = opts.outerHeaders ? [...opts.outerHeaders] : [];
+    const includeChatVersion = opts.includeChatVersion !== false;
     const hasChatVersion = outer.some(h => /^Chat-Version:/i.test(h));
-    if (!hasChatVersion) {
+    if (includeChatVersion && !hasChatVersion) {
         outer.unshift('Chat-Version: 1.0');
     }
 
@@ -164,6 +167,44 @@ export function buildPgpMimeEnvelope(opts: PgpEnvelopeOptions): string {
         opts.armored,
         '',
         `--${encBoundary}--`,
+    ].join('\r\n');
+}
+
+/**
+ * Inner MIME for core `render_symm_encrypted_securejoin_message` (vc-pubkey / vc-request-pubkey).
+ * Bare From (no angle brackets), protected + hidden + HP-Outer headers.
+ */
+export function buildSymmSecureJoinInnerMime(opts: {
+    step: string;
+    auth: string;
+    fromAddr: string;
+    msgId: string;
+    date: string;
+    autocryptHeader: string;
+}): string {
+    const autocryptLines = opts.autocryptHeader.split(/\r?\n/).filter(l => l.length > 0);
+    const hpOuter = [
+        `HP-Outer: From: ${opts.fromAddr}`,
+        'HP-Outer: To: hidden-recipients:;',
+        `HP-Outer: Date: ${opts.date}`,
+        `HP-Outer: Message-ID: ${opts.msgId}`,
+        'HP-Outer: Subject: [...]',
+        ...autocryptLines.map(l => `HP-Outer: ${l}`),
+    ];
+    return [
+        'Content-Type: text/plain; charset=utf-8; protected-headers="v1"; hp="cipher"',
+        `From: ${opts.fromAddr}`,
+        'To: hidden-recipients:;',
+        'Subject: Secure-Join',
+        `Date: ${opts.date}`,
+        `Message-ID: ${opts.msgId}`,
+        ...autocryptLines,
+        `Secure-Join: ${opts.step}`,
+        `Secure-Join-Auth: ${opts.auth}`,
+        `Message-ID: ${opts.msgId}`,
+        ...hpOuter,
+        '',
+        'Secure-Join',
     ].join('\r\n');
 }
 
