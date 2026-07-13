@@ -111,11 +111,62 @@ const ENCRYPT_CONFIG = {
 const DECRYPT_CONFIG = {
     allowUnauthenticatedMessages: true,
     allowMissingKeyFlags: true,
-    preferredSymmetricAlgorithm: openpgp.enums.symmetric.aes256,
+    preferredSymmetricAlgorithm: openpgp.enums.symmetric.aes128,
     // Core 2.53 may emit v5/v6 SEIPD packets openpgp.js skips by default
     enableParsingV5Entities: true,
     parseAEADEncryptedV4KeysAsLegacy: true,
 } as const;
+
+/** SecureJoin v3 / broadcast-style symmetric encryption (rPGP seipd_v2 + OCB + AES128). */
+const SYMMETRIC_ENCRYPT_CONFIG = {
+    preferredCompressionAlgorithm: openpgp.enums.compression.uncompressed,
+    preferredSymmetricAlgorithm: openpgp.enums.symmetric.aes128,
+    aeadProtect: true,
+    preferredAEADAlgorithm: openpgp.enums.aead.ocb,
+    aeadChunkSizeByte: 8192,
+    nonDeterministicSignaturesViaNotation: false,
+} as const;
+
+/** Shared secret for SecureJoin v3 symmetric steps (`vc-request-pubkey` / `vc-pubkey`). */
+export function secureJoinSharedSecret(fingerprint: string, auth: string): string {
+    return `securejoin/${fingerprint.toUpperCase()}/${auth}`;
+}
+
+/** Symmetrically encrypt a MIME payload (optionally signed) for SecureJoin v3 interop. */
+export async function encryptSymmetricSecureJoin(
+    rawMimePayload: string,
+    sharedSecret: string,
+    signingKey: openpgp.PrivateKey | null,
+): Promise<string> {
+    const encrypted = await openpgp.encrypt({
+        message: await openpgp.createMessage({
+            binary: new TextEncoder().encode(rawMimePayload),
+        }),
+        passwords: [sharedSecret],
+        signingKeys: signingKey ?? undefined,
+        format: 'armored',
+        config: SYMMETRIC_ENCRYPT_CONFIG,
+    });
+    return encrypted as string;
+}
+
+/** Try to decrypt a symmetric SecureJoin / broadcast PGP message. */
+export async function decryptSymmetricSecureJoin(
+    armoredMessage: string,
+    sharedSecret: string,
+): Promise<string> {
+    const cleaned = extractArmoredPgpMessage(armoredMessage) || armoredMessage.trim();
+    const message = await openpgp.readMessage({
+        armoredMessage: cleaned,
+        config: DECRYPT_CONFIG,
+    });
+    const { data } = await openpgp.decrypt({
+        message,
+        passwords: [sharedSecret],
+        config: DECRYPT_CONFIG,
+    });
+    return decodeDecryptPayload(data);
+}
 
 /**
  * Public keys we encrypt to for a peer message.

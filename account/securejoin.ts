@@ -72,6 +72,7 @@ export abstract class AccountSecureJoin extends AccountGroups {
             'vc-request-with-auth',
             'vg-request-with-auth',
             'vc-request-pubkey',
+            'vg-request-pubkey',
         ]);
         const isInviterStep =
             inviterSteps.has(step) ||
@@ -192,7 +193,16 @@ export abstract class AccountSecureJoin extends AccountGroups {
         verified: boolean;
         groupInfo?: { grpId: string; name: string; isBroadcast: boolean }
     }> {
-        const result = await securejoinLib.secureJoin(this.ctx(), uri);
+        const parsedJoin = this.parseSecureJoinURI(uri);
+        this.activeSecureJoinAuth = parsedJoin.auth;
+        this.activeSecureJoinInviterFp = parsedJoin.fingerprint;
+        let result;
+        try {
+            result = await securejoinLib.secureJoin(this.ctx(), uri);
+        } finally {
+            this.activeSecureJoinAuth = '';
+            this.activeSecureJoinInviterFp = '';
+        }
 
         // After SecureJoin, persist the peer's contact (display name + public key)
         const peerEmail = result.peerEmail.toLowerCase();

@@ -85,6 +85,9 @@ export abstract class AccountBase {
     // ── SecureJoin tokens ──
     protected myInviteNumber = '';
     protected myAuthToken = '';
+    /** Active joiner scan (SecureJoin v3 symmetric decrypt). Cleared after `secureJoin()`. */
+    protected activeSecureJoinAuth = '';
+    protected activeSecureJoinInviterFp = '';
 
     // ── Group registry (grpId → GroupInfo) ──
     protected groups: Map<string, GroupInfo> = new Map();

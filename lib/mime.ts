@@ -182,6 +182,15 @@ export interface ParseContext {
     privateKey: openpgp.PrivateKey | null;
     knownKeys: Map<string, string>;
     peerAvatars: Map<string, string>;
+    /** Self fingerprint — used for SecureJoin v3 symmetric decrypt as inviter. */
+    fingerprint?: string;
+    /**
+     * Active SecureJoin auth token(s). Inviter: own token(s). Joiner: scanned QR auth.
+     * Used to derive `securejoin/{fp}/{auth}` when asymmetric decrypt fails.
+     */
+    secureJoinAuthTokens?: string[];
+    /** Joiner-only: inviter fingerprint from an active QR scan. */
+    secureJoinInviterFingerprint?: string;
     /**
      * Persist a peer public key into the active account store
      * (MemoryStore or IndexedDB — whichever the SDK was constructed with).
@@ -480,13 +489,62 @@ export async function parseIncoming(raw: IncomingMessage, ctx: ParseContext): Pr
                 }
             }
         } catch (e: any) {
-            // Keep a visible but non-empty error so the UI does not render blank bubbles.
-            // Do not invent Secure-Join / MDN state from undecryptable ciphertext.
             encrypted = true;
             text = '';
-            log.warn('mime', `Decrypt failed from ${from}: ${e?.message || e}`);
-            // Surface in message list as a short placeholder
-            text = '⚠️ Cannot decrypt this message';
+            const symmSecrets: string[] = [];
+            const authTokens = ctx.secureJoinAuthTokens || [];
+            if (ctx.fingerprint) {
+                for (const auth of authTokens) {
+                    if (auth) symmSecrets.push(cryptoLib.secureJoinSharedSecret(ctx.fingerprint, auth));
+                }
+            }
+            if (ctx.secureJoinInviterFingerprint) {
+                for (const auth of authTokens) {
+                    if (auth) {
+                        symmSecrets.push(
+                            cryptoLib.secureJoinSharedSecret(ctx.secureJoinInviterFingerprint, auth),
+                        );
+                    }
+                }
+            }
+            let symmDecrypted = '';
+            for (const secret of symmSecrets) {
+                try {
+                    symmDecrypted = await cryptoLib.decryptSymmetricSecureJoin(pgpData, secret);
+                    break;
+                } catch {
+                    /* try next secret */
+                }
+            }
+            if (symmDecrypted) {
+                encrypted = true;
+                decryptedSource = symmDecrypted;
+                innerHeaders = parseHeaders(symmDecrypted);
+                const protectedFrom = extractEmail(innerHeaders['from'] || '');
+                if (protectedFrom) from = protectedFrom;
+                importAllAutocryptHeaders(symmDecrypted, from, ctx);
+                importAllAutocryptGossipHeaders(symmDecrypted, ctx);
+                const innerSJ = (innerHeaders['secure-join'] || '').trim();
+                const innerInvite = (innerHeaders['secure-join-invitenumber'] || '').trim();
+                if (innerInvite) {
+                    isSecureJoin = true;
+                    sjInviteNumber = innerInvite;
+                    if (!innerSJ || !/^v[cg]-/i.test(innerSJ)) {
+                        const grp = innerHeaders['secure-join-group'] || innerHeaders['chat-group-id'] || '';
+                        sjHeader = grp ? 'vg-request' : 'vc-request';
+                    } else {
+                        sjHeader = innerSJ;
+                    }
+                } else if (/^v[cg]-/i.test(innerSJ)) {
+                    isSecureJoin = true;
+                    sjHeader = innerSJ;
+                }
+                text = extractBody(symmDecrypted);
+                log.info('mime', `SecureJoin v3 symmetric decrypt ok from ${from}: ${sjHeader || innerSJ}`);
+            } else {
+                log.warn('mime', `Decrypt failed from ${from}: ${e?.message || e}`);
+                text = '⚠️ Cannot decrypt this message';
+            }
         }
     } else {
         // Prefer full-message extract; fall back to raw body for JSON control payloads

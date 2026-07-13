@@ -17,6 +17,8 @@ import {
     getKnownKey,
     setKnownKey,
     emailsEqual,
+    encryptSymmetricSecureJoin,
+    secureJoinSharedSecret,
 } from './crypto.js';
 import { buildPgpMimeEnvelope } from './mime-build.js';
 
@@ -505,6 +507,66 @@ export async function sendSecureJoinAuth(
 }
 
 /**
+ * SecureJoin v3 inviter → joiner: `vc-pubkey` / `vg-pubkey`.
+ * Symmetrically encrypted + signed; Autocrypt on outer so core can import our key.
+ */
+export async function sendSecureJoinPubkey(
+    ctx: SDKContext,
+    toEmail: string,
+    authToken: string,
+    prefix: 'vc' | 'vg' = 'vc',
+): Promise<void> {
+    if (!ctx.privateKey || !ctx.publicKey) {
+        throw new Error('Cannot send vc-pubkey: local keys missing');
+    }
+    const step = `${prefix}-pubkey`;
+    const sharedSecret = secureJoinSharedSecret(ctx.fingerprint, authToken);
+    const fromAddr = ctx.credentials.email;
+    const msgId = ctx.generateMsgId();
+    const now = new Date().toUTCString();
+    const outerFrom = `From: <${fromAddr}>`;
+
+    const innerMime = [
+        `Content-Type: text/plain; charset="utf-8"; protected-headers="v1"; hp="cipher"`,
+        `Secure-Join: ${step}`,
+        `Secure-Join-Auth: ${authToken}`,
+        outerFrom,
+        `To: hidden-recipients:;`,
+        `Date: ${now}`,
+        `Subject: Secure-Join`,
+        `Message-ID: ${msgId}`,
+        '',
+        'Secure-Join',
+    ].join('\r\n');
+
+    const armored = await encryptSymmetricSecureJoin(innerMime, sharedSecret, ctx.privateKey);
+    const rawEmail = buildPgpMimeEnvelope({
+        fromHeader: outerFrom,
+        toHeader: 'hidden-recipients:;',
+        msgId,
+        date: now,
+        subject: '[...]',
+        outerHeaders: [],
+        autocryptHeader: ctx.buildAutocryptHeader(),
+        armored,
+    });
+
+    dumpSecureJoinMessage(
+        'OUT',
+        {
+            step,
+            from: fromAddr,
+            to: toEmail,
+            note: 'v3 symmetric+signed + Autocrypt',
+        },
+        rawEmail,
+        { innerMime, sharedSecret: '(redacted)' },
+    );
+    await ctx.sendRaw(ctx.credentials.email, [toEmail], rawEmail);
+    log.info('securejoin', `Sent ${step} (symmetric+signed) to ${toEmail}`);
+}
+
+/**
  * Inviter-side auto-reply (Alice), mirroring core `handle_securejoin_handshake`.
  * Called for every inbound Secure-Join message; joiner-side steps are no-ops here
  * (joiner flow runs in `secureJoin()`).
@@ -526,12 +588,37 @@ export async function handleIncomingSecureJoin(
 
     const prefix = step.startsWith('vg-') ? 'vg' : 'vc';
 
-    if (
-        step === 'vc-request' ||
-        step === 'vg-request' ||
-        step === 'vc-request-pubkey' ||
-        step === 'vg-request-pubkey'
-    ) {
+    if (step === 'vc-request-pubkey' || step === 'vg-request-pubkey') {
+        const incomingAuth = (
+            msg.secureJoinAuth ||
+            msg.innerHeaders?.['secure-join-auth'] ||
+            msg.headers?.['secure-join-auth'] ||
+            ''
+        ).trim();
+        if (!myAuthToken) {
+            log.warn('securejoin', 'request-pubkey ignored: no local auth token (open QR first)');
+            return;
+        }
+        if (!incomingAuth) {
+            log.warn(
+                'securejoin',
+                'request-pubkey ignored: missing Secure-Join-Auth (symmetric decrypt failed?)',
+            );
+            return;
+        }
+        if (incomingAuth !== myAuthToken) {
+            log.warn(
+                'securejoin',
+                `Auth token mismatch on request-pubkey: got "${incomingAuth}", expected "${myAuthToken}"`,
+            );
+            return;
+        }
+        log.info('securejoin', `Received ${step} from ${msg.from} — sending ${prefix}-pubkey`);
+        await sendSecureJoinPubkey(ctx, msg.from, incomingAuth, prefix as 'vc' | 'vg');
+        return;
+    }
+
+    if (step === 'vc-request' || step === 'vg-request') {
         const incomingInviteNum = (
             msg.secureJoinInviteNumber ||
             msg.innerHeaders?.['secure-join-invitenumber'] ||
@@ -553,9 +640,6 @@ export async function handleIncomingSecureJoin(
             );
             return;
         }
-        // NEVER call sendSecureJoinAuth here — that is Phase 3 (joiner→inviter).
-        // Old bug: sendSecureJoinAuth(to, 'vc-auth-required', authToken) produced
-        // encrypted vg-request-with-auth with Secure-Join-Auth: vc-auth-required.
         log.info('securejoin', `Received ${step} from ${msg.from} — sending ${prefix}-auth-required`);
         await sendSecureJoinAuthRequired(ctx, msg.from, prefix as 'vc' | 'vg');
         return;

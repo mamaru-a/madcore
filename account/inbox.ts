@@ -48,6 +48,12 @@ export abstract class AccountInbox extends AccountProfile {
             privateKey: this.privateKey,
             knownKeys: this.knownKeys,
             peerAvatars: this.peerAvatars,
+            fingerprint: this.fingerprint,
+            secureJoinAuthTokens: [
+                ...(this.myAuthToken ? [this.myAuthToken] : []),
+                ...(this.activeSecureJoinAuth ? [this.activeSecureJoinAuth] : []),
+            ],
+            secureJoinInviterFingerprint: this.activeSecureJoinInviterFp,
             // Peer keys land in the active store (MemoryStore or IndexedDB)
             onPeerKey: (email, armored) => {
                 void this.rememberPeerKey(email, armored);
