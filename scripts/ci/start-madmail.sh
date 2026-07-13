@@ -24,9 +24,25 @@ if ! docker network inspect "$NET" >/dev/null 2>&1; then
   docker network create --subnet=172.28.100.0/24 "$NET"
 fi
 
+image_available() {
+  docker image inspect "$IMAGE" >/dev/null 2>&1
+}
+
+ensure_image() {
+  if image_available; then
+    echo "Using local image $IMAGE"
+    return
+  fi
+  if [[ "${MADMAIL_SKIP_PULL:-}" == "1" || "$IMAGE" == *:local ]]; then
+    echo "Image $IMAGE not found locally and pull is disabled" >&2
+    exit 1
+  fi
+  docker pull "$IMAGE"
+}
+
 if [[ ! -f "$DATA/etc/madmail.conf" ]]; then
   echo "Bootstrap install --simple --ip $IP …"
-  docker pull "$IMAGE"
+  ensure_image
   docker run --rm \
     --cap-add NET_BIND_SERVICE \
     --network "$NET" \
