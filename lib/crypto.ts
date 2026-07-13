@@ -138,12 +138,15 @@ export async function encryptSymmetricSecureJoin(
     sharedSecret: string,
     signingKey: openpgp.PrivateKey | null,
 ): Promise<string> {
+    if (signingKey) {
+        const { encryptSymmetricSecureJoinRpgp } = await import('./pgp-rpgp-symm.js');
+        return encryptSymmetricSecureJoinRpgp(rawMimePayload, sharedSecret, signingKey);
+    }
     const encrypted = await openpgp.encrypt({
         message: await openpgp.createMessage({
             binary: new TextEncoder().encode(rawMimePayload),
         }),
         passwords: [sharedSecret],
-        signingKeys: signingKey ?? undefined,
         format: 'armored',
         config: SYMMETRIC_ENCRYPT_CONFIG,
     });
